@@ -54,6 +54,8 @@ function main() {
   // Collapse the previous current entry FIRST, then prepend the new open one —
   // order matters: a blind replace after insertion would hit the new block.
   readme = readme.replace('<details open>', '<details>');
+  // Drop the "(текущая)" marker from the entry that just stopped being current.
+  readme = readme.replace(' (текущая)</summary>', '</summary>');
   const firstDetails = readme.indexOf('<details');
   if (firstDetails === -1) {
     console.error('no <details> block found in README, aborting');
