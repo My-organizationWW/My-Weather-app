@@ -1,24 +1,26 @@
 import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import Svg, { Defs, RadialGradient, Stop, Rect } from 'react-native-svg';
+import { getWeatherTheme } from './DraggableCityCard';
 
 // Top card for the device's geolocation. Rendered ONLY when coordinates were
 // successfully resolved (location !== null). Deliberately NOT a DraggableCityCard:
 // no drag handle, no checkbox, no delete — it is not part of the saved list.
 export default function CurrentLocationCard({ item, theme, fs, t, onPress, style }) {
   const safeItem = { ...item, isNight: item?.isNight ?? false };
-  const isDarkText = !safeItem.isNight;
-  const mainText = isDarkText ? '#1e293b' : '#FFFFFF';
-  const subText = isDarkText ? 'rgba(30, 41, 59, 0.75)' : 'rgba(255, 255, 255, 0.8)';
-  const minMaxColor = isDarkText ? 'rgba(30, 41, 59, 0.7)' : 'rgba(255, 255, 255, 0.7)';
+  const weatherTheme = getWeatherTheme(safeItem.weathercode, safeItem.isNight);
+  const subText = 'rgba(255, 255, 255, 0.85)';
+  const minMaxColor = 'rgba(255, 255, 255, 0.7)';
 
   const styles = useMemo(() => StyleSheet.create({
     cardContainer: {
       borderRadius: 28,
       overflow: 'hidden',
       borderWidth: 1,
-      borderColor: 'rgba(255, 255, 255, 0.15)',
-      borderTopColor: 'rgba(255, 255, 255, 0.35)',
+      borderColor: 'rgba(255, 255, 255, 0.14)',
+      borderTopColor: 'rgba(255, 255, 255, 0.28)',
       elevation: 8,
       shadowColor: '#000',
       shadowOffset: { width: 0, height: 8 },
@@ -72,6 +74,7 @@ export default function CurrentLocationCard({ item, theme, fs, t, onPress, style
     locationBadgeText: {
       fontSize: fs.small * 1.05,
       fontWeight: '500',
+      color: 'rgba(255, 255, 255, 0.85)',
       marginLeft: 4,
       flexShrink: 1,
     },
@@ -90,6 +93,7 @@ export default function CurrentLocationCard({ item, theme, fs, t, onPress, style
     tempDegree: {
       fontSize: fs.large * 1.1,
       fontWeight: '700',
+      color: '#FFFFFF',
       marginTop: 4,
       marginLeft: 1,
     },
@@ -103,21 +107,41 @@ export default function CurrentLocationCard({ item, theme, fs, t, onPress, style
     },
   }), [theme, fs]);
 
-  const cardColor = safeItem.weathercode !== undefined
-    ? getItemColor(safeItem.weathercode, safeItem.isNight)
-    : '#4a6b8a';
-
   return (
     <View style={[styles.cardContainer, style]}>
       <Pressable onPress={onPress} disabled={!onPress}>
-        <View style={[styles.cardBackground, { backgroundColor: cardColor }]}>
+        <View style={styles.cardBackground}>
+          <LinearGradient
+            colors={weatherTheme.colors}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={StyleSheet.absoluteFill}
+          />
+          <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
+            <Defs>
+              <RadialGradient
+                id="current-location-glow"
+                cx="82%"
+                cy="35%"
+                rx="55%"
+                ry="65%"
+                fx="82%"
+                fy="35%"
+              >
+                <Stop offset="0%" stopColor="#ffffff" stopOpacity={0.16} />
+                <Stop offset="55%" stopColor="#ffffff" stopOpacity={0.05} />
+                <Stop offset="100%" stopColor="#ffffff" stopOpacity={0} />
+              </RadialGradient>
+            </Defs>
+            <Rect x="0" y="0" width="100%" height="100%" fill="url(#current-location-glow)" />
+          </Svg>
           <View style={styles.cardBody}>
             <View style={styles.pinWrap}>
-              <Ionicons name="location-sharp" size={22} color={subText} />
+              <Ionicons name="location-sharp" size={22} color="#FFFFFF" />
             </View>
             <View style={styles.cardLeft}>
               <Text
-                style={[styles.cityName, { color: mainText }]}
+                style={styles.cityName}
                 numberOfLines={1}
                 ellipsizeMode="tail"
                 adjustsFontSizeToFit
@@ -129,19 +153,19 @@ export default function CurrentLocationCard({ item, theme, fs, t, onPress, style
                 <Ionicons
                   name="compass"
                   size={15}
-                  color={isDarkText ? 'rgba(30, 41, 59, 0.75)' : 'rgba(255, 255, 255, 0.85)'}
+                  color="#38bdf8"
                 />
-                <Text style={[styles.locationBadgeText, { color: subText }]} numberOfLines={1} ellipsizeMode="tail">
+                <Text style={styles.locationBadgeText} numberOfLines={1} ellipsizeMode="tail">
                   {t('cities.current_location')}
                 </Text>
               </View>
             </View>
             <View style={styles.cardRight}>
               <View style={styles.tempRow}>
-                <Text style={[styles.cityTemp, { color: mainText }]}>{safeItem.temp || '0'}</Text>
-                <Text style={[styles.tempDegree, { color: mainText }]}>°</Text>
+                <Text style={styles.cityTemp}>{safeItem.temp || '0'}</Text>
+                <Text style={styles.tempDegree}>°</Text>
               </View>
-              <Text style={[styles.cityMinMax, { color: minMaxColor }]}>{safeItem.minMax || ''}</Text>
+              <Text style={styles.cityMinMax}>{safeItem.minMax || ''}</Text>
             </View>
           </View>
         </View>
@@ -149,15 +173,3 @@ export default function CurrentLocationCard({ item, theme, fs, t, onPress, style
     </View>
   );
 }
-
-const getItemColor = (code, isNight) => {
-  if (isNight) return '#232f45';
-  const c = code ?? 2;
-  if (c === 0) return '#7cc0ee';
-  if (c <= 3) return '#b9c9d8';
-  if (c <= 48) return '#c3cad4';
-  if (c <= 67) return '#7d9fc4';
-  if (c <= 77) return '#cfe3f7';
-  if (c <= 82) return '#8ba9cc';
-  return '#9aa0c3';
-};

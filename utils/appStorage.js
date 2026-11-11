@@ -1,6 +1,6 @@
 // App-owned storage base, shared by crash logs and city backups.
 //
-// SDK 57's JS API only exposes the app's own sandbox
+// SDK 58's JS API only exposes the app's own sandbox
 // (documentDirectory = /data/user/0/<package>/files/ on Android,
 // the app container on iOS). That is enough for this use case: zero
 // permissions, zero folder picking, auto-created subfolders, and — unlike

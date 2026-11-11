@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { View, Text, TextInput, FlatList, Alert, StatusBar, RefreshControl, Pressable, TouchableOpacity, StyleSheet, Animated as RNAnimated } from 'react-native';
-import Animated, { useSharedValue, FadeInUp, Easing } from 'react-native-reanimated';
+import Animated, { useSharedValue, useAnimatedStyle, useAnimatedReaction, withTiming, withSpring, FadeInUp, Easing } from 'react-native-reanimated';
 import ScreenWrapper from './ScreenWrapper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -91,6 +91,80 @@ function SkeletonCard({ theme, fs }) {
   );
 }
 
+// FlatList wraps every row in its own cell. All movement is applied to the
+// CELL itself, not to the card inside it. This matters for touch handling:
+// Android clips hit-testing to each cell's own layout box, so a card shifted
+// by a transform inside a stationary cell becomes untouchable at its visual
+// position (and its old position swallows taps). Moving the cell moves both
+// the drawing AND the hit box with it, so every card stays tappable after any
+// number of reorders.
+//
+// The list still keeps a stable render order (cells never move in layout), so
+// committing a reorder produces no native layout pass and therefore no drag
+// flicker. Only transforms on the UI thread change.
+const NEIGHBOUR_SPRING = { damping: 22, stiffness: 220, mass: 0.8 };
+const DragCellContext = React.createContext(null);
+
+function DragCell({ item, index, cellKey, style, children, ...props }) {
+  const ctx = React.useContext(DragCellContext);
+  const itemId = item?.id ?? cellKey;
+  const slotShift = useSharedValue(0);
+  const slotTarget = useSharedValue(0);
+
+  // Same slot math as before, moved from the card to its cell.
+  useAnimatedReaction(
+    () => {
+      if (!ctx) return 0;
+      const pos = ctx.order.value.indexOf(itemId);
+      if (pos < 0) return 0;
+      let slot = pos;
+      const from = ctx.activeIndex.value;
+      if (ctx.activeId.value !== null && ctx.activeId.value !== itemId && from >= 0) {
+        const offset = ctx.dragOffset.value;
+        const stride = ctx.stride;
+        const steps = offset >= 0
+          ? Math.floor((offset + stride * 0.5) / stride)
+          : -Math.floor((-offset + stride * 0.5) / stride);
+        const to = Math.max(0, Math.min(ctx.itemCount - 1, from + steps));
+        if (pos > from && pos <= to) slot = pos - 1;
+        else if (pos < from && pos >= to) slot = pos + 1;
+      }
+      return (slot - index) * ctx.stride;
+    },
+    (target) => {
+      if (!ctx) return;
+      if (target === slotTarget.value) return;
+      slotTarget.value = target;
+      slotShift.value = ctx.activeId.value !== null
+        ? withSpring(target, NEIGHBOUR_SPRING)
+        : target;
+    },
+    [index, itemId, ctx],
+  );
+
+  const cellStyle = useAnimatedStyle(() => {
+    const isActive = Boolean(ctx && ctx.activeId.value !== null && ctx.activeId.value === itemId);
+    let y = slotShift.value;
+    if (isActive) {
+      // Active card: committed slot + live finger delta.
+      const pos = ctx.order.value.indexOf(itemId);
+      const resting = pos >= 0 ? (pos - index) * ctx.stride : 0;
+      y = resting + ctx.dragOffset.value;
+    }
+    return {
+      zIndex: isActive ? 99999 : 1,
+      elevation: isActive ? 50 : 0,
+      transform: [{ translateY: y }],
+    };
+  });
+
+  return (
+    <Animated.View {...props} style={[style, cellStyle]}>
+      {children}
+    </Animated.View>
+  );
+}
+
 export default function CityListScreen() {
   const navigation = useNavigation();
   const { theme } = useTheme();
@@ -121,13 +195,14 @@ export default function CityListScreen() {
   // that time so the scroll view never fights the pan gesture (that fight
   // shows up as jitter of the whole list mid-drag).
   const [isDragging, setIsDragging] = useState(false);
-  // Logical slot of the dragged card. Mirrored into the activeIndex shared
-  // value via effect (see below) — never written from the gesture directly,
-  // so the base flip and the data flip always land in the same render.
+  // FlatList cell index of the dragged card (-1 = none). Only used to lift
+  // that cell above its siblings (see DragCell).
   const [dragBase, setDragBase] = useState(-1);
 
   const CARD_HEIGHT = 90;
 
+  // Slot (position in `order`) of the dragged card. Written only from the
+  // gesture worklets, so it never lags behind the UI thread.
   const activeIndex = useSharedValue(-1);
   const dragOffset = useSharedValue(0);
   // Stable identity of the dragged card (item id survives reorder, unlike
@@ -149,6 +224,99 @@ export default function CityListScreen() {
   const citiesRef = useRef(cities);
   citiesRef.current = cities;
 
+  // Visual order of the cards (ids) on the UI thread.
+  const order = useSharedValue([]);
+
+  // Exact card stride (card height + gap) used by the cell shift math.
+  const cardStride = Math.round(fs.cardHeight * 1.375) + fs.spacing;
+
+  // Everything a cell needs to compute its visual slot on the UI thread.
+  const dragCellValue = useMemo(
+    () => ({
+      order,
+      activeId,
+      activeIndex,
+      dragOffset,
+      itemCount: cities.length,
+      stride: cardStride,
+    }),
+    [order, activeId, activeIndex, dragOffset, cities.length, cardStride],
+  );
+
+  // Search row collapse/expand. Animating its height (instead of unmounting
+  // it) prevents the one-frame overlap/jump that looked like flicker when
+  // entering or leaving selection mode.
+  const searchRowHeight = Math.round(fs.spacing * 3.5 + 8);
+  const searchRowProgress = useSharedValue(isSelectionMode ? 0 : 1);
+  useEffect(() => {
+    searchRowProgress.value = withTiming(isSelectionMode ? 0 : 1, {
+      duration: 260,
+      easing: Easing.bezier(0.22, 1, 0.36, 1),
+    });
+  }, [isSelectionMode]);
+  const searchRowAnimStyle = useAnimatedStyle(() => ({
+    height: searchRowProgress.value * searchRowHeight,
+    opacity: searchRowProgress.value,
+  }));
+
+  // Delete bar. It stays mounted for the whole screen lifetime and is only
+  // faded/slid by a shared value. Mounting/unmounting an Animated.View with
+  // entering/exiting layout animations races the first frame on Android and
+  // occasionally showed the bar at full opacity for one frame (visible
+  // flicker). A persistent view driven by useAnimatedStyle has no such race.
+  const showDeleteBar = isSelectionMode && selectedCities.size > 0;
+  const deleteBarProgress = useSharedValue(0);
+  useEffect(() => {
+    deleteBarProgress.value = withTiming(showDeleteBar ? 1 : 0, {
+      duration: showDeleteBar ? 220 : 160,
+      easing: showDeleteBar ? Easing.out(Easing.quad) : Easing.in(Easing.quad),
+    });
+  }, [showDeleteBar]);
+  const deleteBarAnimStyle = useAnimatedStyle(() => ({
+    opacity: deleteBarProgress.value,
+    transform: [{ translateY: (1 - deleteBarProgress.value) * 70 }],
+  }));
+
+  // Header title ("Управление городами" <-> "N объектов"). The label itself
+  // has to swap the instant the mode changes, so instead of a crossfade we
+  // blank it for one frame and fade the new text in. useLayoutEffect (not
+  // useEffect) is what makes that work: it runs before the commit reaches the
+  // screen, so the first painted frame of the new label is already at
+  // opacity 0 — no flash of the old/new string side by side.
+  const headerTitleProgress = useSharedValue(1);
+  const headerTitleMounted = useRef(false);
+  useLayoutEffect(() => {
+    if (!headerTitleMounted.current) {
+      headerTitleMounted.current = true;
+      return;
+    }
+    headerTitleProgress.value = 0;
+    headerTitleProgress.value = withTiming(1, {
+      duration: 180,
+      easing: Easing.out(Easing.quad),
+    });
+  }, [isSelectionMode]);
+  const headerTitleAnimStyle = useAnimatedStyle(() => ({
+    opacity: headerTitleProgress.value,
+  }));
+
+  // Stable cell order: cells in FlatList stay in their original render positions,
+  // so committing a reorder NEVER triggers a native layout re-render pass (0px jump/flicker).
+  // All card positioning is handled with exact pixel precision via Reanimated transforms.
+  const renderOrderRef = useRef([]);
+  const renderList = useMemo(() => {
+    const byId = new Map(cities.map((c) => [c.id, c]));
+    const prev = renderOrderRef.current;
+    const sameSet = prev.length === cities.length && prev.every((id) => byId.has(id));
+    const ids = sameSet ? prev : cities.map((c) => c.id);
+    renderOrderRef.current = ids;
+    return ids.map((id) => byId.get(id));
+  }, [cities]);
+
+  useLayoutEffect(() => {
+    order.value = cities.map((c) => c.id);
+  }, [cities]);
+
   const onReorder = useCallback(async (fromIndex, toIndex) => {
     const list = citiesRef.current;
     if (fromIndex < 0 || toIndex < 0 || toIndex >= list.length) return;
@@ -159,17 +327,9 @@ export default function CityListScreen() {
     await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(newCities));
   }, []);
 
-  // Mirror the logical base into the shared value after every render commit.
-  // Because React batches the setCities + setDragBase calls below into one
-  // render, worklets always observe base and slots from the same generation —
-  // the 1–3 frame skew (new base + old slots) that caused the release
-  // twitch is structurally impossible.
-  useEffect(() => {
-    activeIndex.value = dragBase;
-  }, [dragBase]);
-
   // Stable drag-lifecycle entries for the gesture (all empty-deps, so the
-  // gesture object is created once and never restarted mid-drag).
+  // gesture object is created once and never restarted mid-drag). The drag
+  // shared values are reset by the card's landing worklet, not here.
   const beginDrag = useCallback((i) => {
     setDragBase(i);
     setIsDragging(true);
@@ -180,7 +340,8 @@ export default function CityListScreen() {
   }, []);
   const commitReorder = useCallback((fromIndex, toIndex) => {
     onReorder(fromIndex, toIndex);
-    setDragBase(toIndex);
+    setDragBase(-1);
+    setIsDragging(false);
   }, [onReorder]);
 
   const styles = useMemo(() => StyleSheet.create({
@@ -189,13 +350,14 @@ export default function CityListScreen() {
       flexDirection: 'row',
       alignItems: 'center',
       paddingHorizontal: fs.spacing,
-      paddingVertical: fs.spacing * 0.75,
+      paddingTop: 0,
+      paddingBottom: 4,
       borderBottomWidth: 1,
     },
     backButton: {
-      width: fs.iconSize * 1.5,
-      height: fs.iconSize * 1.5,
-      borderRadius: 14,
+      width: fs.iconSize * 1.35,
+      height: fs.iconSize * 1.35,
+      borderRadius: 12,
       alignItems: 'center',
       justifyContent: 'center',
     },
@@ -209,8 +371,10 @@ export default function CityListScreen() {
     searchRow: {
       flexDirection: 'row',
       paddingHorizontal: fs.spacing,
-      paddingVertical: fs.spacing * 0.75,
+      paddingTop: fs.spacing * 0.5,
+      paddingBottom: 8,
       alignItems: 'center',
+      overflow: 'hidden',
     },
     input: {
       flex: 1,
@@ -230,11 +394,11 @@ export default function CityListScreen() {
     },
     listContainer: {
       paddingHorizontal: fs.spacing,
-      paddingTop: fs.spacing * 0.5,
+      paddingTop: 0,
       paddingBottom: fs.spacing * 1.75,
     },
     // Fixed geolocation layer above the list. Android draw order is global
-    // by elevation (card itself gets 28 > dragged card's 20); iOS stacks
+    // by elevation (card itself gets 32 > dragged card's 30); iOS stacks
     // siblings by zIndex, so 30 wins over the whole FlatList subtree.
     locationHeader: {
       paddingHorizontal: fs.spacing,
@@ -245,8 +409,8 @@ export default function CityListScreen() {
     // Чистые стили, на драг не влияют.
     sectionHeader: {
       paddingHorizontal: 4,
-      paddingTop: fs.spacing,
-      paddingBottom: fs.spacing * 0.5,
+      paddingTop: fs.spacing * 0.5,
+      paddingBottom: 6,
     },
     sectionHeaderText: {
       fontSize: fs.small,
@@ -374,31 +538,38 @@ export default function CityListScreen() {
     },
     batchBottomBar: {
       position: 'absolute',
-      bottom: 0,
+      bottom: Math.max(insets.bottom, 12) + 8,
       left: 0,
       right: 0,
-      backgroundColor: theme.surface,
-      borderTopWidth: 1,
-      borderTopColor: theme.border,
-      paddingHorizontal: fs.spacing * 1.5,
-      paddingVertical: fs.spacing,
+      alignItems: 'center',
+      justifyContent: 'center',
+      pointerEvents: 'box-none',
+      zIndex: 90,
+    },
+    batchDeleteButton: {
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
-    },
-    batchDeleteButton: {
-      width: '100%',
-      borderRadius: 16,
-      paddingVertical: fs.spacing * 0.85,
-      alignItems: 'center',
-      justifyContent: 'center',
+      gap: 8,
+      paddingHorizontal: fs.spacing * 1.5,
+      paddingVertical: fs.spacing * 0.75,
+      borderRadius: 26,
+      backgroundColor: 'rgba(255, 59, 48, 0.85)',
+      borderWidth: 1,
+      borderColor: 'rgba(255, 255, 255, 0.3)',
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 6 },
+      shadowOpacity: 0.35,
+      shadowRadius: 14,
+      elevation: 14,
     },
     batchDeleteText: {
       color: '#FFFFFF',
-      fontSize: fs.base,
+      fontSize: fs.base * 1.05,
       fontWeight: '700',
+      letterSpacing: 0.2,
     },
-  }), [theme, fs]);
+  }), [theme, fs, insets]);
 
   useEffect(() => {
     // Deferred past the first frames so the push transition owns them
@@ -492,6 +663,26 @@ export default function CityListScreen() {
           { id: '3', name: 'Сочи' },
         ];
       }
+
+      // Deduplicate loaded cities by normalized name and ensure unique IDs
+      if (Array.isArray(list)) {
+        const seenNames = new Set();
+        const seenIds = new Set();
+        list = list.filter((city) => {
+          if (!city || !city.name) return false;
+          const normName = city.name.trim().toLowerCase();
+          if (seenNames.has(normName)) return false;
+          seenNames.add(normName);
+          return true;
+        }).map((city, idx) => {
+          let id = String(city.id ?? `city_${idx}`);
+          if (seenIds.has(id)) {
+            id = `${id}_${idx}`;
+          }
+          seenIds.add(id);
+          return { ...city, id };
+        });
+      }
       // Optimistic paint: cached cities (with last-known weather) hit the
       // screen instantly — no full-screen spinner. The probe + per-city
       // refresh below runs in the background and swaps data in on arrival
@@ -581,8 +772,12 @@ export default function CityListScreen() {
         updatedList.push(city);
       }
 
-        setCities(updatedList);
-        await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(updatedList));
+        // Merge enriched weather data into the CURRENT user order
+        // so any drag-and-drop reordering done while refreshing isn't wiped out.
+        const byId = new Map(updatedList.map(c => [c.id, c]));
+        const merged = citiesRef.current.map(c => byId.get(c.id) ?? c);
+        setCities(merged);
+        await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(merged));
     } catch (e) {
       console.error(e);
     } finally {
@@ -653,10 +848,7 @@ export default function CityListScreen() {
   const getWeatherIcon = (code, isNight) => {
     const c = code ?? 2;
     if (c === 0) return isNight ? 'moon' : 'sunny';
-    if (c <= 3) {
-      if (c === 1) return isNight ? 'cloudy-night' : 'partly-sunny';
-      return 'cloudy';
-    }
+    if (c <= 3) return isNight ? 'cloudy-night' : 'partly-sunny';
     if (c <= 48) return 'cloudy';
     if (c <= 67) return 'rainy';
     if (c <= 77) return 'snow';
@@ -720,6 +912,15 @@ export default function CityListScreen() {
         isNight,
       };
 
+      const isDuplicate = cities.some(
+        c => c.name?.trim().toLowerCase() === (name || cityName).trim().toLowerCase()
+      );
+      if (isDuplicate) {
+        Alert.alert(t('cities.notice') || '', t('cities.already_added') || 'Город уже в списке');
+        setSearchQuery('');
+        return;
+      }
+
       const updated = [...cities, newCity];
       setCities(updated);
       await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(updated));
@@ -733,8 +934,10 @@ export default function CityListScreen() {
 
   const handleLongPressCity = (id, name, index) => {
     if (!isSelectionMode) {
+      // Long-press only OPENS the editor. Nothing is pre-selected: the user
+      // decides which cards to delete by tapping their checkboxes.
       setIsSelectionMode(true);
-      setSelectedCities(new Set([id]));
+      setSelectedCities(new Set());
     } else {
       toggleSelectCity(id);
     }
@@ -852,13 +1055,14 @@ export default function CityListScreen() {
         commitReorder={commitReorder}
         trace={trace}
         released={released}
+        order={order}
          itemCount={cities.length}
        />
     );
   };
 
   return (
-    <ScreenWrapper>
+    <ScreenWrapper contentStyle={{ paddingTop: Math.max(insets.top - 12, 0) }}>
       {/* Header */}
       <View style={[styles.header, { borderBottomColor: theme.border }]}>
         <TouchableOpacity
@@ -868,7 +1072,7 @@ export default function CityListScreen() {
           <Ionicons name={isSelectionMode ? "close" : "arrow-back"} size={22} color={theme.text} />
         </TouchableOpacity>
         <Text
-          style={[styles.headerTitle, { color: theme.text }]}
+          style={[styles.headerTitle, { color: theme.text }, headerTitleAnimStyle]}
           numberOfLines={1}
           ellipsizeMode="tail"
           adjustsFontSizeToFit
@@ -885,50 +1089,24 @@ export default function CityListScreen() {
         )}
       </View>
 
-      {/* Search / Add Bar */}
-      {!isSelectionMode && (
-        <View style={styles.searchRow}>
-          <TextInput
-            style={[styles.input, { backgroundColor: theme.surfaceRaised, color: theme.text, borderColor: theme.border }]}
-            placeholder={t('cities.add_placeholder')}
-            placeholderTextColor={theme.textMuted}
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            onSubmitEditing={handleAddCity}
-          />
-          <TouchableOpacity style={[styles.addButton, { backgroundColor: theme.tint || '#3a7bd5' }]} onPress={handleAddCity}>
-            <Ionicons name="add" size={24} color="#FFFFFF" />
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* Fixed geolocation header: lives OUTSIDE the FlatList so it never
-          scrolls, never shifts during reorder, and always draws above the
-          dragged card (higher elevation / zIndex = "слои" effect). */}
-      {currentLocation ? (
-        <Animated.View
-          entering={
-            FadeInUp.duration(250)
-              .easing(Easing.out(Easing.quad))
-              .withInitialValues({ opacity: 0, transform: [{ translateY: 10 }] })
-          }
-          style={styles.locationHeader}
-        >
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionHeaderText}>{t('cities.current_location')}</Text>
-          </View>
-          <CurrentLocationCard
-            item={currentLocation}
-            theme={theme}
-            fs={fs}
-            t={t}
-            style={{ elevation: 28 }}
-            onPress={currentLocation.isCoordinateFallback
-              ? undefined
-              : () => handleSelectCity(currentLocation.name)}
-          />
-        </Animated.View>
-      ) : null}
+      {/* Search / Add Bar (height collapses smoothly in selection mode) */}
+      <Animated.View
+        style={[styles.searchRow, searchRowAnimStyle]}
+        pointerEvents={isSelectionMode ? 'none' : 'auto'}
+      >
+        <TextInput
+          style={[styles.input, { backgroundColor: theme.surfaceRaised, color: theme.text, borderColor: theme.border }]}
+          placeholder={t('cities.add_placeholder')}
+          placeholderTextColor={theme.textMuted}
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+          onSubmitEditing={handleAddCity}
+          editable={!isSelectionMode}
+        />
+        <TouchableOpacity style={[styles.addButton, { backgroundColor: theme.tint || '#3a7bd5' }]} onPress={handleAddCity}>
+          <Ionicons name="add" size={24} color="#FFFFFF" />
+        </TouchableOpacity>
+      </Animated.View>
 
       {!listMounted ? (
         <View style={{ flex: 1 }} />
@@ -953,13 +1131,37 @@ export default function CityListScreen() {
           }
           style={{ flex: 1 }}
         >
+          <DragCellContext.Provider value={dragCellValue}>
           <FlatList
-            data={cities}
+            data={renderList}
             keyExtractor={(item, index) => String(item?.id ?? index)}
             renderItem={renderItem}
+            CellRendererComponent={DragCell}
+            // Cards are placed by transforms; clipping by layout bounds
+            // could detach a card that is visually on screen.
+            removeClippedSubviews={false}
             ListHeaderComponent={
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionHeaderText}>{t('cities.saved_cities')}</Text>
+              <View>
+                {currentLocation ? (
+                  <View>
+                    <View style={[styles.sectionHeader, { paddingTop: 8 }]}>
+                      <Text style={styles.sectionHeaderText}>{t('cities.current_location')}</Text>
+                    </View>
+                    <CurrentLocationCard
+                      item={currentLocation}
+                      theme={theme}
+                      fs={fs}
+                      t={t}
+                      style={{ marginBottom: fs.spacing * 0.6 }}
+                      onPress={currentLocation.isCoordinateFallback
+                        ? undefined
+                        : () => handleSelectCity(currentLocation.name)}
+                    />
+                  </View>
+                ) : null}
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionHeaderText}>{t('cities.saved_cities')}</Text>
+                </View>
               </View>
             }
             ListEmptyComponent={
@@ -967,28 +1169,55 @@ export default function CityListScreen() {
             }
             style={{ flex: 1 }}
             scrollEnabled={!isDragging}
-            contentContainerStyle={styles.listContainer}
+            contentContainerStyle={[
+              styles.listContainer,
+              // Reserve the delete-bar space for the WHOLE selection session,
+              // not only after the first checkbox. Changing the content height
+              // at the same moment the search row collapses made the ScrollView
+              // re-clamp (visible jump) when the list was scrolled to the bottom.
+              isSelectionMode && { paddingBottom: 110 },
+            ]}
             showsVerticalScrollIndicator={false}
-            refreshControl={!isSelectionMode ? (
-              <RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); loadSavedCitiesAndRefresh(); loadCurrentLocation(); }} />
-            ) : undefined}
+            // RefreshControl MUST stay mounted for the whole screen lifetime.
+            // On Android RN wraps the ScrollView in a SwipeRefreshLayout only
+            // when this prop is set; swapping element <-> undefined changes
+            // the root component type and remounts the native ScrollView and
+            // every cell (visible flash when entering/leaving selection
+            // mode). Keeping it mounted and disabling it avoids the remount.
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                enabled={!isSelectionMode}
+                onRefresh={() => {
+                  if (isSelectionMode) return;
+                  setRefreshing(true);
+                  loadSavedCitiesAndRefresh();
+                  loadCurrentLocation();
+                }}
+              />
+            }
           />
+          </DragCellContext.Provider>
         </Animated.View>
       )}
 
-      {isSelectionMode && selectedCities.size > 0 && (
-        <View style={styles.batchBottomBar}>
-          <TouchableOpacity
-            style={[styles.batchDeleteButton, { backgroundColor: theme.danger || '#FF453A' }]}
-            onPress={handlePromptBatchDelete}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.batchDeleteText}>
-              {t('cities.delete')} ({selectedCities.size})
-            </Text>
-          </TouchableOpacity>
-        </View>
-      )}
+      {/* Persistent delete bar: mounted always, shown/hidden by shared value
+          (opacity + slide). No mount/unmount layout animation => no flash. */}
+      <Animated.View
+        style={[styles.batchBottomBar, deleteBarAnimStyle]}
+        pointerEvents={showDeleteBar ? 'box-none' : 'none'}
+      >
+        <TouchableOpacity
+          style={styles.batchDeleteButton}
+          onPress={handlePromptBatchDelete}
+          activeOpacity={0.8}
+        >
+          <Ionicons name="trash-outline" size={20} color="#FFFFFF" />
+          <Text style={styles.batchDeleteText}>
+            {t('cities.delete')} ({selectedCities.size})
+          </Text>
+        </TouchableOpacity>
+      </Animated.View>
 
       <ConfirmDeleteModal
         visible={deleteTarget !== null}

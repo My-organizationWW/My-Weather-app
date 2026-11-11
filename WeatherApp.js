@@ -23,6 +23,8 @@ import {
    StatusBar,
    Modal,
    TouchableWithoutFeedback,
+   Keyboard,
+   SafeAreaView,
   } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
@@ -1103,6 +1105,26 @@ export default function App() {
   const settingsScreenX = useRef(new Animated.Value(SCREEN_WIDTH)).current;
   const pickerAnim = useRef(new Animated.Value(0)).current;
   const languagePickerAnim = useRef(new Animated.Value(0)).current;
+  const placeholderAnim = useRef(new Animated.Value(city.length === 0 ? 1 : 0)).current;
+  const clearButtonAnim = useRef(new Animated.Value(city.length > 0 ? 1 : 0)).current;
+
+  useEffect(() => {
+    const hasText = city.length > 0;
+    Animated.parallel([
+      Animated.timing(placeholderAnim, {
+        toValue: hasText ? 0 : 1,
+        duration: 180,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+      Animated.timing(clearButtonAnim, {
+        toValue: hasText ? 1 : 0,
+        duration: 180,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [city]);
   const fs = useFontSize();
   const styles = useMemo(() => buildStyles(theme, fs || { spacing: 16, base: 16, small: 12, large: 20, iconSize: 24, cardHeight: 80 }, insets), [theme, fs, insets]);
   const currentThemeLabel = useMemo(() => {
@@ -1165,7 +1187,6 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
         const snapshot = { place: cached.place, data: cached.data, savedAt: cached.savedAt };
         weatherRef.current = snapshot;
         setWeather(snapshot);
-        if (cached.query) setCity(cached.query);
         setIsStale(true);
         // Restore refresh intent from cache so pull-to-refresh / retry
         // never falls back to geolocation (Scenario A, not B).
@@ -1181,7 +1202,6 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
         if (active && !saved) detectMyLocation();
         return;
       }
-      setCity(saved);
       // Strict rule: NEVER re-geocode on launch. If we have a cached
       // place with coordinates, refresh data in place and keep its
       // frozen name/country. doSearch() runs only when there is no
@@ -1421,6 +1441,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
       if (rememberRef.current && place.name && place.name !== tr('currentLocation')) {
         await saveLastCity(place.name);
       }
+      setCity('');
     } catch (e) {
       if (isOfflineError(e)) {
         setError(tr('noInternet'));
@@ -1492,6 +1513,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
       if (rememberRef.current) {
         await saveLastCity(query);
       }
+      setCity('');
     } catch (e) {
       if (isOfflineError(e)) {
         setError(tr('noInternet'));
@@ -1512,7 +1534,6 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
   useEffect(() => {
     if (cityParam && appliedCityParam.current !== cityParam) {
       appliedCityParam.current = cityParam;
-      setCity(cityParam);
       doSearch(cityParam);
     }
   }, [cityParam]);
@@ -1522,6 +1543,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
       Alert.alert(tr('enterCity'), tr('enterCityMessage'));
       return;
     }
+    Keyboard.dismiss();
     doSearch(query);
   };
   // Swipe/Retry refresh: fetch ONLY fresh weather data for the currently
@@ -1762,13 +1784,6 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
   return (
     <ScreenWrapper>
         <Animated.View style={[styles.container, { opacity: contentOpacity }]}>
-          <View style={styles.titleRow}>
-            <Text style={styles.title}>{tr('weather')}</Text>
-            <TouchableOpacity style={styles.gearButton} onPress={toggleMenu} activeOpacity={0.7}>
-              <Ionicons name="ellipsis-vertical" size={24} color={theme.text} />
-            </TouchableOpacity>
-          </View>
-
           <Modal
             visible={menuVisible}
             transparent={true}
@@ -1813,28 +1828,104 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
               </View>
             </TouchableWithoutFeedback>
           </Modal>
-          <View style={styles.searchRow}>
-            <TextInput
-              style={styles.input}
-              placeholder={tr('enterCity')}
-              placeholderTextColor={switchTrackOff}
-              value={city}
-              onChangeText={setCity}
-              onSubmitEditing={search}
-              returnKeyType="search"
-            />
-            <TouchableOpacity style={styles.button} onPress={search} activeOpacity={0.7}>
-              <Text style={styles.buttonText}>{tr('search')}</Text>
+
+          <ScrollView
+            style={styles.result}
+            contentContainerStyle={styles.resultContent}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                tintColor={refreshColors[0]}
+                colors={refreshColors}
+                progressBackgroundColor={theme.surface}
+                titleColor={theme.textSecondary}
+              />
+            }
+          >
+          <View style={styles.searchBarContainer}>
+            <TouchableOpacity onPress={search} style={styles.searchIconWrap} activeOpacity={0.7} hitSlop={6}>
+              <Ionicons name="search" size={20} color={theme.textMuted || '#94a3b8'} />
+            </TouchableOpacity>
+
+            <View style={styles.inputWrap}>
+              <Animated.Text
+                style={[
+                  styles.animatedPlaceholder,
+                  {
+                    opacity: placeholderAnim,
+                    transform: [
+                      {
+                        translateX: placeholderAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [6, 0],
+                        }),
+                      },
+                    ],
+                  },
+                ]}
+                pointerEvents="none"
+              >
+                {tr('enterCity')}
+              </Animated.Text>
+              <TextInput
+                style={styles.searchInput}
+                value={city}
+                onChangeText={setCity}
+                onSubmitEditing={search}
+                returnKeyType="search"
+              />
+            </View>
+
+            <Animated.View
+              style={{
+                opacity: clearButtonAnim,
+                transform: [
+                  {
+                    scale: clearButtonAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.6, 1],
+                    }),
+                  },
+                ],
+              }}
+              pointerEvents={city.length > 0 ? 'auto' : 'none'}
+            >
+              <TouchableOpacity
+                onPress={() => setCity('')}
+                style={styles.searchActionBtn}
+                activeOpacity={0.6}
+                hitSlop={6}
+              >
+                <Ionicons name="close-circle" size={18} color={theme.textMuted || 'rgba(255,255,255,0.4)'} />
+              </TouchableOpacity>
+            </Animated.View>
+
+            <TouchableOpacity
+              onPress={detectMyLocation}
+              disabled={locating}
+              style={[styles.searchActionBtn, locating && { opacity: 0.5 }]}
+              activeOpacity={0.6}
+              hitSlop={6}
+            >
+              <Ionicons
+                name="locate-outline"
+                size={22}
+                color={theme.accent || '#38bdf8'}
+              />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={toggleMenu}
+              style={styles.searchActionBtn}
+              activeOpacity={0.6}
+              hitSlop={6}
+            >
+              <Ionicons name="ellipsis-vertical" size={20} color={theme.text} />
             </TouchableOpacity>
           </View>
-          <TouchableOpacity
-            style={[styles.button, styles.locButton, locating && styles.buttonDisabled]}
-            onPress={detectMyLocation}
-            disabled={locating}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.buttonText}>{tr('detectLocation')}</Text>
-          </TouchableOpacity>
           {showBanner && (
             <View
               style={[
@@ -1877,21 +1968,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
             </View>
           )}
           {weather && (
-            <ScrollView
-              style={styles.result}
-              contentContainerStyle={styles.resultContent}
-              showsVerticalScrollIndicator={false}
-              refreshControl={
-                <RefreshControl
-                  refreshing={refreshing}
-                  onRefresh={onRefresh}
-                  tintColor={refreshColors[0]}
-                  colors={refreshColors}
-                  progressBackgroundColor={theme.surface}
-                  titleColor={theme.textSecondary}
-                />
-              }
-            >
+            <View>
               <Text style={styles.cityName}>{weather.place.name}</Text>
               {isStale && weather.savedAt && (
                 <Text style={styles.staleLabel}>
@@ -2002,7 +2079,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                   </Text>
                 </View>
               ))}
-            </ScrollView>
+            </View>
           )}
            {!loading && !locating && !weather && (
              <View style={styles.center}>
@@ -2011,6 +2088,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                </Text>
              </View>
            )}
+          </ScrollView>
         </Animated.View>
         {splashRendered && (
           <Animated.View
@@ -2415,17 +2493,65 @@ const buildStyles = (theme, fs, insets) =>
     splashText: { color: theme.textSecondary, fontSize: fs.small },
     title: { fontSize: fs.base * 2, fontWeight: '700', color: theme.text, textAlign: 'center', marginTop: 0, marginLeft: 0 },
     container: { flex: 1, position: 'relative', paddingHorizontal: fs.spacing },
-    titleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: fs.spacing, marginTop: fs.spacing * 0.2 },
-    gearButton: { marginRight: 0, marginTop: 0, padding: fs.spacing * 0.375, zIndex: 1 },
+    titleRow: { display: 'none' },
+    gearButton: { width: fs.spacing * 2.75, height: fs.spacing * 3, alignItems: 'center', justifyContent: 'center', marginLeft: fs.spacing * 0.25 },
     gearIcon: { fontSize: fs.iconSize },
     menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: 60, paddingRight: 16 },
     dropdownMenu: { minWidth: 220, borderRadius: 16, borderWidth: 1, paddingVertical: 6, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
     menuItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 18 },
     menuItemText: { fontSize: 16, fontWeight: '600' },
     menuDivider: { height: 1, width: '100%', marginVertical: 2 },
-    searchRow: { flexDirection: 'row', marginBottom: fs.spacing * 0.625 },
-    input: { flex: 1, height: fs.spacing * 3, backgroundColor: theme.surface, borderRadius: 10, paddingHorizontal: fs.spacing * 0.875, color: theme.text, fontSize: fs.base, marginRight: fs.spacing * 0.625 },
-    button: { height: fs.spacing * 3, paddingHorizontal: fs.spacing * 1.25, backgroundColor: theme.accent, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+    searchBarContainer: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: theme.surface,
+      borderRadius: 18,
+      paddingHorizontal: fs.spacing * 0.75,
+      height: fs.spacing * 3.125,
+      marginTop: fs.spacing * 0.25,
+      marginBottom: fs.spacing * 0.75,
+      borderWidth: 1,
+      borderColor: theme.border || 'rgba(255,255,255,0.08)',
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.15,
+      shadowRadius: 8,
+      elevation: 4,
+    },
+    searchIconWrap: {
+      paddingHorizontal: 4,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    inputWrap: {
+      flex: 1,
+      height: '100%',
+      justifyContent: 'center',
+      position: 'relative',
+    },
+    animatedPlaceholder: {
+      position: 'absolute',
+      left: fs.spacing * 0.5,
+      color: theme.textMuted || 'rgba(255,255,255,0.4)',
+      fontSize: fs.base,
+    },
+    searchInput: {
+      flex: 1,
+      height: '100%',
+      color: theme.text,
+      fontSize: fs.base,
+      paddingHorizontal: fs.spacing * 0.5,
+    },
+    searchActionBtn: {
+      padding: 6,
+      borderRadius: 12,
+      justifyContent: 'center',
+      alignItems: 'center',
+      marginLeft: 4,
+    },
+    searchRow: { flexDirection: 'row', alignItems: 'center', marginBottom: fs.spacing * 0.625, paddingTop: fs.spacing * 0.35 },
+    input: { flex: 1, height: fs.spacing * 3, backgroundColor: theme.surface, borderRadius: 12, paddingHorizontal: fs.spacing * 0.875, color: theme.text, fontSize: fs.base, marginRight: fs.spacing * 0.5 },
+    button: { height: fs.spacing * 3, paddingHorizontal: fs.spacing * 1.15, backgroundColor: theme.accent, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
     locButton: { backgroundColor: theme.accent2, marginBottom: fs.spacing },
     buttonDisabled: { opacity: 0.5 },
     buttonText: { color: theme.onAccent, fontSize: fs.base, fontWeight: '600' },

@@ -3,7 +3,7 @@ import { View, StatusBar, StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from './ThemeContext';
 
-export default function ScreenWrapper({ children, style, backgroundColor }) {
+export default function ScreenWrapper({ children, style, contentStyle, backgroundColor }) {
   const insets = useSafeAreaInsets();
   const { theme } = useTheme();
 
@@ -12,12 +12,8 @@ export default function ScreenWrapper({ children, style, backgroundColor }) {
 
   return (
     <View style={[styles.container, { backgroundColor: bg }, style]}>
-      <StatusBar
-        barStyle={isDark ? 'light-content' : 'dark-content'}
-        backgroundColor="transparent"
-        translucent
-      />
-      <View style={[styles.content, { paddingTop: Math.max(insets.top + 2, 16) }]}>
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
+      <View style={[styles.content, { paddingTop: Math.max(insets.top, 8) }, contentStyle]}>
         {children}
       </View>
     </View>

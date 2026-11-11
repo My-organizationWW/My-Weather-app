@@ -2,7 +2,7 @@
 
 [![Build APK](https://github.com/werxuiiika/My-Weather-app/actions/workflows/android-build.yml/badge.svg)](https://github.com/werxuiiika/My-Weather-app/actions)
 
-Лёгкое адаптивное приложение погоды для Android на **React Native (Expo SDK 57)**.
+Лёгкое адаптивное приложение погоды для Android на **React Native (Expo SDK 58)**.
 Особенность проекта: весь цикл — от кода до релизного APK — делается **с мобильного устройства** (Termux + OpenCode).
 
 ## ✨ Ключевые особенности
@@ -19,7 +19,7 @@
 
 ## 🛠️ Стек
 
-React Native · Expo SDK 57 · JavaScript (ES6+) · Yarn Classic · Open-Meteo API (без ключей) · i18next · React Navigation · GitHub Actions
+React Native · Expo SDK 58 · JavaScript (ES6+) · Yarn Classic · Open-Meteo API (без ключей) · i18next · React Navigation · GitHub Actions
 
 ## 🚀 Запуск
 

@@ -1,16 +1,41 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useCallback, useEffect } from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { GestureDetector, Gesture } from 'react-native-gesture-handler';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withTiming,
+  withRepeat,
+  withDelay,
+  withSequence,
+  cancelAnimation,
+  useReducedMotion,
   Easing,
   runOnJS,
-  LinearTransition,
 } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import Svg, { Defs, RadialGradient, Stop, Rect } from 'react-native-svg';
 import { saveDragTrace } from './utils/dragTrace';
+
+const LANDING = { duration: 180, easing: Easing.out(Easing.quad) };
+
+// Selection controls (3-line drag handle + round checkbox) live inside every
+// card permanently. Their container collapses to width 0 instead of being
+// unmounted, so entering/leaving selection mode is one continuous animation
+// (no pop, no instant text jump).
+// In normal mode, cardBody.paddingLeft = fs.spacing (~16px) gives city names
+// a tight, natural inset. In selection mode, controlsWrap pulls left by 8px
+// (placing the 3-line handle at 8px from the card edge) and groups the handle
+// and checkbox closely together (~8px gap).
+// Open width = handle (4+22+4=30) + 4 gap + checkbox 24 + 15 gap = 73.
+const CONTROLS_WIDTH = 73;
+// Same curve/timing on the card controls and on the search row in
+// CityListScreen so the whole transition reads as a single motion.
+const SELECTION_TIMING = {
+  duration: 260,
+  easing: Easing.bezier(0.22, 1, 0.36, 1),
+};
 
 export default function DraggableCityCard({
   item,
@@ -31,45 +56,57 @@ export default function DraggableCityCard({
   itemCount,
   trace,
   released,
+  order,
 }) {
   const safeItem = { ...item, isNight: item?.isNight ?? false };
   // Stable per-instance identity for the active branch (see below).
   const itemId = safeItem.id ?? String(index);
-  // Per-card swap displacement (overlap-and-swap model): 0 at rest,
-  // exactly one slot (±stride) while the dragged card overlaps this one.
-  const slotShift = useSharedValue(0);
-  const slotTarget = useSharedValue(0);
-  const isDarkText = !safeItem.isNight;
-  const mainText = isDarkText ? '#1e293b' : '#FFFFFF';
-  const subText = isDarkText ? 'rgba(30, 41, 59, 0.75)' : 'rgba(255, 255, 255, 0.8)';
-  const minMaxColor = isDarkText ? 'rgba(30, 41, 59, 0.7)' : 'rgba(255, 255, 255, 0.7)';
+  // 0..1 "lifted in hand" amount: scale, opacity, shadow, layer.
+  // All positional movement lives on the FlatList cell (see DragCell in
+  // CityListScreen), so the card itself never needs a translate.
+  const lift = useSharedValue(0);
+  // 0 = normal card, 1 = selection mode controls fully open.
+  const selectionProgress = useSharedValue(isSelectionMode ? 1 : 0);
+  useEffect(() => {
+    selectionProgress.value = withTiming(
+      isSelectionMode ? 1 : 0,
+      SELECTION_TIMING,
+    );
+  }, [isSelectionMode]);
+
+  const weatherTheme = getWeatherTheme(safeItem.weathercode, safeItem.isNight);
+  const subText = 'rgba(255, 255, 255, 0.75)';
+  const minMaxColor = 'rgba(255, 255, 255, 0.7)';
 
   const styles = useMemo(() => StyleSheet.create({
     cardContainer: {
       borderRadius: 28,
       overflow: 'hidden',
       borderWidth: 1,
-      borderColor: 'rgba(255, 255, 255, 0.15)',
-      borderTopColor: 'rgba(255, 255, 255, 0.35)',
+      borderColor: 'rgba(255, 255, 255, 0.14)',
+      borderTopColor: 'rgba(255, 255, 255, 0.28)',
       elevation: 8,
       shadowColor: '#000',
       shadowOffset: { width: 0, height: 8 },
       shadowOpacity: 0.25,
       shadowRadius: 12,
+      height: Math.round(fs.cardHeight * 1.375),
       marginBottom: fs.spacing,
     },
     cardBackground: {
       borderRadius: 28,
       overflow: 'hidden',
       width: '100%',
+      height: '100%',
     },
     cardBody: {
+      flex: 1,
       flexDirection: 'row',
       justifyContent: 'space-between',
       alignItems: 'center',
-      paddingHorizontal: fs.spacing * 1.25,
-      paddingVertical: fs.spacing,
-      minHeight: fs.cardHeight * 1.375,
+      paddingLeft: fs.spacing,
+      paddingRight: fs.spacing * 1.25,
+      paddingVertical: fs.spacing * 0.75,
     },
     cardLeft: {
       flex: 0.65,
@@ -90,7 +127,7 @@ export default function DraggableCityCard({
     },
     cityCondition: {
       fontSize: fs.small * 1.05,
-      color: 'rgba(255, 255, 255, 0.8)',
+      color: 'rgba(255, 255, 255, 0.85)',
       fontWeight: '500',
       flexShrink: 1,
     },
@@ -114,6 +151,7 @@ export default function DraggableCityCard({
     tempDegree: {
       fontSize: fs.large * 1.1,
       fontWeight: '700',
+      color: '#FFFFFF',
       marginTop: 4,
       marginLeft: 1,
     },
@@ -132,198 +170,188 @@ export default function DraggableCityCard({
       borderWidth: 2,
       alignItems: 'center',
       justifyContent: 'center',
+      // Breathing room between the circle and the city name. Lives inside the
+      // animated box (see CONTROLS_WIDTH), so it appears with the controls.
+      marginRight: 15,
+    },
+    controlsWrap: {
+      overflow: 'hidden',
+    },
+    controlsRow: {
+      width: CONTROLS_WIDTH,
+      flexDirection: 'row',
+      alignItems: 'center',
     },
     dragHandle: {
-      padding: 8,
-      marginRight: 8,
+      paddingHorizontal: 4,
+      paddingVertical: 8,
+      // Tighter cluster: handle and circle read as one control (~8px gap).
+      marginRight: 4,
       alignItems: 'center',
       justifyContent: 'center',
     },
   }), [theme, fs]);
 
-  const cardColor = safeItem.weathercode !== undefined
-    ? getItemColor(safeItem.weathercode, safeItem.isNight)
-    : '#4a6b8a';
-  const weatherIcon = safeItem.weathercode !== undefined
-    ? getWeatherIcon(safeItem.weathercode, safeItem.isNight)
-    : 'cloudy';
+  // Real slot height: exact card height + bottom margin (matches styles above).
+  const cardH = Math.round(fs.cardHeight * 1.375);
+  const stride = cardH + fs.spacing;
 
-  // Real slot height: min card height + bottom margin (matches styles above).
-  const stride = fs.cardHeight * 1.375 + fs.spacing;
+  const finishCommit = useCallback((from, to, snapshot) => {
+    commitReorder(from, to);
+    saveDragTrace(snapshot);
+  }, [commitReorder]);
+
+  const finishCancel = useCallback((snapshot) => {
+    endDrag();
+    saveDragTrace(snapshot);
+  }, [endDrag]);
 
   const panGesture = useMemo(() => Gesture.Pan()
     .onStart(() => {
       'worklet';
-      // NOTE: the logical base is set via beginDrag (React state) on purpose —
-      // writing activeIndex here would desync it from the data for a few
-      // frames. The 1-frame delay is imperceptible; the skew is not.
+      const from = order.value.indexOf(itemId);
+      if (from < 0 || activeId.value !== null) return;
       activeId.value = itemId;
+      activeIndex.value = from;
       dragOffset.value = 0;
       trace.value = [];
       released.value = 0;
-      runOnJS(beginDrag)(index);
+      lift.value = withTiming(1, { duration: 120, easing: Easing.out(Easing.quad) });
+      runOnJS(beginDrag)(from);
     })
     .onUpdate((e) => {
       'worklet';
-      // The dragged card slides OVER the static neighbours — their swap is
-      // driven separately by the center-crossing rule in animatedStyle.
+      if (activeId.value !== itemId || released.value === 1) return;
       dragOffset.value = e.translationY;
     })
     .onEnd(() => {
       'worklet';
-      // Freeze neighbour thresholds from this frame on: post-release the
-      // layouts are mid-flight (LinearTransition), so thresholds evaluated
-      // against moving targets fire spuriously on bystanders. Cards only
-      // ease back to rest from here.
+      if (activeId.value !== itemId || released.value === 1) return;
       released.value = 1;
+      const from = activeIndex.value;
       const offset = dragOffset.value;
-      // 75% overlap rule (matches the visual swap threshold below): a full
-      // slot counts once the finger carried the card three quarters in.
-      const steps =
-        offset >= 0
-          ? Math.floor(offset / stride + 0.25)
-          : -Math.floor(-offset / stride + 0.25);
-      const newIndex = index + steps;
-      const shouldReorder =
-        newIndex >= 0 && newIndex < itemCount && newIndex !== index;
+      const steps = offset >= 0
+        ? Math.floor((offset + stride * 0.5) / stride)
+        : -Math.floor((-offset + stride * 0.5) / stride);
+      const to = Math.max(0, Math.min(itemCount - 1, from + steps));
+      const shouldReorder = to !== from;
+
       if (trace.value.length < 1500) {
-        trace.value.push(['e', Date.now(), Math.round(offset), shouldReorder ? newIndex : -1]);
+        trace.value.push(['e', Date.now(), Math.round(offset), shouldReorder ? to : -1]);
       }
-      if (shouldReorder) {
-        // Commit FIRST so layouts update immediately: the dragged card then
-        // glides exactly once from the finger to its new slot (layout
-        // transition + residual transform easing out together). No
-        // glide-back phase, no second motion. commitReorder batches the data
-        // swap and the base flip into ONE render — atomic for worklets.
-        // NOTE: never commit here twice — a second identical splice would
-        // apply to the NEW array (adjacent swaps would flip straight back).
-        runOnJS(commitReorder)(index, newIndex);
-      }
-      // Single residual glide to rest for every card.
-      dragOffset.value = withTiming(
-        0,
-        { duration: 220, easing: Easing.inOut(Easing.quad) },
-        () => {
-          'worklet';
-          activeId.value = null;
-          runOnJS(endDrag)();
-          const snapshot = trace.value;
-          trace.value = [];
-          runOnJS(saveDragTrace)(snapshot);
+
+      // Smooth landing into slot
+      lift.value = withTiming(0, LANDING);
+      const targetOffset = (to - from) * stride;
+      dragOffset.value = withTiming(targetOffset, LANDING, (finished) => {
+        'worklet';
+        if (!finished) return;
+        if (shouldReorder) {
+          const next = order.value.slice();
+          next.splice(from, 1);
+          next.splice(to, 0, itemId);
+          order.value = next;
         }
-      );
+        dragOffset.value = 0;
+        activeIndex.value = -1;
+        activeId.value = null;
+        const snapshot = trace.value;
+        trace.value = [];
+        if (shouldReorder) {
+          runOnJS(finishCommit)(from, to, snapshot);
+        } else {
+          runOnJS(finishCancel)(snapshot);
+        }
+      });
     }),
-    [index, itemCount, stride, itemId, beginDrag, endDrag, commitReorder, released]);
+    [index, itemCount, stride, itemId, beginDrag, finishCommit, finishCancel, released, order]);
 
   const animatedStyle = useAnimatedStyle(() => {
-    // Branch by stable item id, NOT by numeric index: at the commit frame
-    // the data swaps (index props change) 1–3 frames before/after the shared
-    // values settle, and an index-based branch would teleport the dragged
-    // card between the active and neighbour branches for those frames —
-    // that teleport is exactly the release flicker. The id survives reorder,
-    // so the dragged card never leaves its branch mid-flight.
     const active = activeId.value === itemId;
-    const draggingIdx = activeIndex.value;
-    const offset = dragOffset.value;
-
-    let translateY = 0;
-    let scale = 1;
-    let zIndex = 1;
-    let opacity = 1;
-    let shadowOpacityVal = 0;
-    let shadowRadiusVal = 12;
+    const l = lift.value;
 
     if (active) {
-      translateY = offset;
-      scale = 1.05;
-      zIndex = 1000;
-      opacity = 0.95;
-      shadowOpacityVal = 0.4;
-      shadowRadiusVal = 20;
       // Drag telemetry: one sample per frame (~60Hz) for offline analysis.
       if (trace.value.length < 1500) {
-        trace.value.push(['s', Date.now(), Math.round(offset), 0]);
+        trace.value.push(['s', Date.now(), Math.round(dragOffset.value), 0]);
       }
-    } else if (draggingIdx >= 0 && draggingIdx !== index) {
-      const activePos = draggingIdx * stride;
-      const myPos = index * stride;
-      // Overlap & swap with hysteresis: step aside once the dragged card
-      // covers 75% of this card, but step back only when the overlap drops
-      // below 50%. The deadband between the two thresholds stops the swap
-      // from chattering when the finger hovers right at the boundary —
-      // that chatter is the visible jitter. Thresholds are evaluated only
-      // while the finger is down; after release (released flag) every card
-      // just eases back to rest.
-      const atRest = slotTarget.value === 0;
-      let desired = atRest ? 0 : slotTarget.value;
-      if (released.value === 0) {
-        if (myPos > activePos) {
-          if (atRest && offset > (myPos - activePos) - stride / 4) {
-            desired = -stride; // card below the dragged one: move up
-          } else if (!atRest && offset < (myPos - activePos) - stride / 2) {
-            desired = 0;
-          }
-        } else if (myPos < activePos) {
-          if (atRest && offset < (myPos - activePos) + stride / 4) {
-            desired = stride; // card above the dragged one: move down
-          } else if (!atRest && offset > (myPos - activePos) + stride / 2) {
-            desired = 0;
-          }
-        }
-      } else {
-        desired = 0;
-      }
-      if (slotTarget.value !== desired) {
-        slotTarget.value = desired;
-        slotShift.value = withTiming(desired, { duration: 220, easing: Easing.inOut(Easing.quad) });
-        if (trace.value.length < 1500) {
-          trace.value.push(['x', Date.now(), index, desired === 0 ? 0 : desired > 0 ? 1 : -1]);
-        }
-      }
-      translateY = slotShift.value;
-    } else if (slotTarget.value !== 0) {
-      // No active drag — ease back to rest (covers release frames).
-      slotTarget.value = 0;
-      slotShift.value = withTiming(0, { duration: 220, easing: Easing.inOut(Easing.quad) });
-      translateY = slotShift.value;
     }
 
     return {
-      transform: [
-        { translateY },
-        { scale },
-      ],
-      zIndex,
-      opacity,
-      // iOS shadow…
-      shadowOpacity: shadowOpacityVal,
-      shadowRadius: shadowRadiusVal,
-      // …Android shadow (shadow* props are iOS-only; Android draws the card
-      // above its siblings and renders the lift shadow only via elevation).
-      elevation: active ? 20 : 8,
+      transform: [{ scale: 1 + 0.04 * l }],
+      opacity: 1 - 0.04 * l,
+      zIndex: active || l > 0 ? 9999 : 1,
+      shadowColor: '#000',
+      shadowOpacity: 0.25 + 0.1 * l,
+      shadowRadius: 12 + 6 * l,
+      elevation: 8 + 22 * l,
     };
   });
 
   const canSelectItem = isSelectionMode;
 
+  // Outer wrapper: collapsing/expanding width. In selection mode, it pulls
+  // 8px left so the drag handle sits compactly inside the card without
+  // compromising normal mode's comfortable text padding.
+  const controlsWrapStyle = useAnimatedStyle(() => {
+    const p = selectionProgress.value;
+    return {
+      width: CONTROLS_WIDTH * p,
+      marginLeft: -8 * p,
+    };
+  });
+  // Inner fixed-width row: slides in from the left while fading/scaling in.
+  const controlsInnerStyle = useAnimatedStyle(() => {
+    const p = selectionProgress.value;
+    return {
+      opacity: p,
+      transform: [
+        { translateX: -12 * (1 - p) },
+        { scale: 0.85 + 0.15 * p },
+      ],
+    };
+  });
+
   return (
     <Animated.View
       style={[styles.cardContainer, animatedStyle]}
-      layout={LinearTransition.duration(220).easing(Easing.inOut(Easing.quad))}
     >
       <Pressable
         onPress={() => onSelectToggle(safeItem.id, safeItem.name, index)}
         onLongPress={() => onLongPressCity?.(safeItem.id, safeItem.name, index)}
         delayLongPress={400}
       >
-      <View
-        style={[styles.cardBackground, { backgroundColor: cardColor }]}
-      >
-        <View
-          style={[styles.cardBody, canSelectItem ? { paddingLeft: fs.spacing * 0.75 } : {}]}
-        >
-          {canSelectItem && (
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+      <View style={styles.cardBackground}>
+        <LinearGradient
+          colors={weatherTheme.colors}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+        <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
+          <Defs>
+            <RadialGradient
+              id={`glow-${itemId}`}
+              cx="82%"
+              cy="35%"
+              rx="55%"
+              ry="65%"
+              fx="82%"
+              fy="35%"
+            >
+              <Stop offset="0%" stopColor="#ffffff" stopOpacity={0.16} />
+              <Stop offset="55%" stopColor="#ffffff" stopOpacity={0.05} />
+              <Stop offset="100%" stopColor="#ffffff" stopOpacity={0} />
+            </RadialGradient>
+          </Defs>
+          <Rect x="0" y="0" width="100%" height="100%" fill={`url(#glow-${itemId})`} />
+        </Svg>
+        <View style={styles.cardBody}>
+          <Animated.View
+            style={[styles.controlsWrap, controlsWrapStyle]}
+            pointerEvents={canSelectItem ? 'auto' : 'none'}
+          >
+            <Animated.View style={[styles.controlsRow, controlsInnerStyle]}>
               <GestureDetector gesture={panGesture}>
                 <View style={styles.dragHandle}>
                   <Ionicons name="menu" size={22} color={subText} />
@@ -332,7 +360,7 @@ export default function DraggableCityCard({
               <Pressable
                 style={[
                   styles.checkbox,
-                  { borderColor: mainText },
+                  { borderColor: 'rgba(255, 255, 255, 0.85)' },
                   isSelected && { backgroundColor: theme.tint || '#3a7bd5', borderColor: theme.tint || '#3a7bd5' },
                 ]}
                 hitSlop={8}
@@ -340,11 +368,11 @@ export default function DraggableCityCard({
               >
                 {isSelected && <Ionicons name="checkmark" size={16} color="#FFFFFF" />}
               </Pressable>
-            </View>
-          )}
-          <View style={[styles.cardLeft, canSelectItem ? { flex: 0.5 } : {}]}>
+            </Animated.View>
+          </Animated.View>
+          <View style={styles.cardLeft}>
             <Text
-              style={[styles.cityName, { color: mainText }]}
+              style={styles.cityName}
               numberOfLines={1}
               ellipsizeMode="tail"
               adjustsFontSizeToFit
@@ -353,18 +381,21 @@ export default function DraggableCityCard({
               {safeItem.name}
             </Text>
             <View style={styles.conditionRow}>
-              <Ionicons name={weatherIcon} size={15} color={isDarkText ? 'rgba(30, 41, 59, 0.75)' : 'rgba(255, 255, 255, 0.85)'} />
-              <Text style={[styles.cityCondition, { color: subText }]} numberOfLines={1} ellipsizeMode="tail">
+              <WeatherConditionIcon
+                code={safeItem.weathercode}
+                isNight={safeItem.isNight}
+              />
+              <Text style={styles.cityCondition} numberOfLines={1} ellipsizeMode="tail">
                 {safeItem.condition || t('condition.cloudy')}
               </Text>
             </View>
           </View>
           <View style={styles.cardRight}>
             <View style={styles.tempRow}>
-            <Text style={[styles.cityTemp, { color: mainText }]}>{safeItem.temp || '–'}</Text>
-                <Text style={[styles.tempDegree, { color: mainText }]}>°</Text>
-              </View>
-              <Text style={[styles.cityMinMax, { color: minMaxColor }]}>{safeItem.minMax || ''}</Text>
+              <Text style={styles.cityTemp}>{safeItem.temp || '–'}</Text>
+              <Text style={styles.tempDegree}>°</Text>
+            </View>
+            <Text style={styles.cityMinMax}>{safeItem.minMax || ''}</Text>
           </View>
         </View>
       </View>
@@ -373,28 +404,315 @@ export default function DraggableCityCard({
   );
 }
 
-const getItemColor = (code, isNight) => {
-  if (isNight) return '#232f45';
+export const getWeatherTheme = (code, isNight) => {
   const c = code ?? 2;
-  if (c === 0) return '#7cc0ee';
-  if (c <= 3) return '#b9c9d8';
-  if (c <= 48) return '#c3cad4';
-  if (c <= 67) return '#7d9fc4';
-  if (c <= 77) return '#cfe3f7';
-  if (c <= 82) return '#8ba9cc';
-  return '#9aa0c3';
+  // 1. clear (Ясно): днём лазурно-голубой (#2563eb → #38bdf8), ночью звёздный индиго-фиолетовый (#1e1b4b → #312e81)
+  if (c === 0) {
+    return {
+      colors: isNight ? ['#1e1b4b', '#312e81'] : ['#2563eb', '#38bdf8'],
+      icon: isNight ? 'moon' : 'sunny',
+      iconColor: isNight ? '#fbbf24' : '#fde047',
+    };
+  }
+  // 2. cloudy / partly (Облачно): мягкий серо-синий графит (#334155 → #475569 днём, #1e293b → #334155 ночью)
+  if (c <= 3) {
+    return {
+      colors: isNight ? ['#1e293b', '#334155'] : ['#334155', '#475569'],
+      icon: isNight ? 'cloudy-night' : 'partly-sunny',
+      iconColor: '#fbbf24',
+    };
+  }
+  // 3. fog (Туман): дымчато-сизый (#3f4c59 → #64748b днём, #222b35 → #3b4754 ночью)
+  if (c <= 48) {
+    return {
+      colors: isNight ? ['#222b35', '#3b4754'] : ['#3f4c59', '#64748b'],
+      icon: 'cloudy',
+      iconColor: '#94a3b8',
+    };
+  }
+  // 4. rain (Дождь): морской сине-бирюзовый (#1d4ed8 → #0f766e днём, #172554 → #134e4a ночью)
+  if (c <= 67) {
+    return {
+      colors: isNight ? ['#172554', '#134e4a'] : ['#1d4ed8', '#0f766e'],
+      icon: 'rainy',
+      iconColor: '#7dd3fc',
+    };
+  }
+  // 5. snow (Снег): морозный льдисто-голубой (#3b82f6 → #60a5fa днём, #1e3a5f → #2563eb ночью)
+  if (c <= 77) {
+    return {
+      colors: isNight ? ['#1e3a5f', '#2563eb'] : ['#3b82f6', '#60a5fa'],
+      icon: 'snow',
+      iconColor: '#f0f9ff',
+    };
+  }
+  // 6. showers (Ливень): штормовой кобальт с цианом (#1e3a8a → #0369a1 днём, #0f172a → #164e63 ночью)
+  if (c <= 86) {
+    return {
+      colors: isNight ? ['#0f172a', '#164e63'] : ['#1e3a8a', '#0369a1'],
+      icon: 'rainy',
+      iconColor: '#7dd3fc',
+    };
+  }
+  // 7. thunder (Гроза): пурпурно-сланцевый (#3b0764 → #1e293b)
+  return {
+    colors: ['#3b0764', '#1e293b'],
+    icon: 'thunderstorm',
+    iconColor: '#facc15',
+  };
 };
 
-const getWeatherIcon = (code, isNight) => {
+// Micro-animations for the 16px status icons. They run on the UI thread
+// (Reanimated) and stay subtle: a slow spin for sun/snow, falling rain drops,
+// a soft pulse for the moon, a small drift for fog and an occasional lightning
+// flash. Reduced-motion users get static icons.
+function AnimatedWeatherIcon({
+  name,
+  size = 16,
+  color,
+  style,
+  animation = 'none',
+  duration = 20000,
+}) {
+  const reduceMotion = useReducedMotion();
+  const progress = useSharedValue(animation === 'flash' ? 1 : 0);
+
+  useEffect(() => {
+    if (reduceMotion || animation === 'none') {
+      progress.value = animation === 'flash' ? 1 : 0;
+      return undefined;
+    }
+    if (animation === 'spin') {
+      progress.value = withRepeat(
+        withTiming(1, { duration, easing: Easing.linear }),
+        -1,
+        false,
+      );
+    } else if (animation === 'drift') {
+      progress.value = withRepeat(
+        withTiming(1, { duration, easing: Easing.inOut(Easing.quad) }),
+        -1,
+        true,
+      );
+    } else if (animation === 'pulse') {
+      progress.value = withRepeat(
+        withTiming(1, { duration, easing: Easing.inOut(Easing.sin) }),
+        -1,
+        true,
+      );
+    } else if (animation === 'flash') {
+      progress.value = 1;
+      progress.value = withRepeat(
+        withSequence(
+          withTiming(1, { duration: 0 }),
+          withDelay(2400, withTiming(1, { duration: 1 })),
+          withTiming(0.35, { duration: 70 }),
+          withTiming(1, { duration: 70 }),
+          withDelay(120, withTiming(0.45, { duration: 60 })),
+          withTiming(1, { duration: 60 }),
+        ),
+        -1,
+        false,
+      );
+    }
+    return () => cancelAnimation(progress);
+  }, [animation, duration, reduceMotion]);
+
+  const animatedStyle = useAnimatedStyle(() => {
+    switch (animation) {
+      case 'spin':
+        return { transform: [{ rotate: `${progress.value * 360}deg` }] };
+      case 'drift':
+        return { transform: [{ translateX: progress.value * 3 - 1.5 }] };
+      case 'pulse':
+        return {
+          opacity: 1 - progress.value * 0.18,
+          transform: [{ scale: 1 + progress.value * 0.06 }],
+        };
+      case 'flash':
+        return { opacity: progress.value };
+      default:
+        return {};
+    }
+  });
+
+  return (
+    <Animated.View style={[iconStyles.iconBox, style, animatedStyle]}>
+      <Ionicons name={name} size={size} color={color} />
+    </Animated.View>
+  );
+}
+
+// A single rain streak. Streaks live in a clipped 5px strip under the cloud,
+// fall at constant speed and are cut off at the bottom of the icon, so the
+// loop never shows a jump or a blinking drop.
+function RainStreak({ left, delay = 0, duration = 560 }) {
+  const reduceMotion = useReducedMotion();
+  const fall = useSharedValue(0);
+
+  useEffect(() => {
+    if (reduceMotion) {
+      fall.value = 0.45;
+      return undefined;
+    }
+    fall.value = withDelay(
+      delay,
+      withRepeat(withTiming(1, { duration, easing: Easing.linear }), -1, false),
+    );
+    return () => cancelAnimation(fall);
+  }, [delay, duration, reduceMotion]);
+
+  const streakStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: fall.value * 5 }, { rotate: '10deg' }],
+  }));
+
+  return (
+    <Animated.View style={[iconStyles.rainStreak, { left }, streakStyle]} />
+  );
+}
+
+function RainConditionIcon() {
+  return (
+    <View style={iconStyles.rainWithDrops}>
+      <Ionicons
+        name="cloud"
+        size={14}
+        color="#FFFFFF"
+        style={iconStyles.rainCloud}
+      />
+      <View style={iconStyles.rainFallArea}>
+        <RainStreak left={3} />
+        <RainStreak left={8} delay={185} />
+        <RainStreak left={13} delay={370} />
+      </View>
+    </View>
+  );
+}
+
+function WeatherConditionIcon({ code, isNight }) {
   const c = code ?? 2;
-  if (c === 0) return isNight ? 'moon' : 'sunny';
-  if (c <= 3) {
-    if (c === 1) return isNight ? 'cloudy-night' : 'partly-sunny';
-    return 'cloudy';
+  // 1. Clear (Ясно): солнце медленно вращается, месяц мягко «дышит»
+  if (c === 0) {
+    return (
+      <AnimatedWeatherIcon
+        name={isNight ? 'moon' : 'sunny'}
+        size={16}
+        color={isNight ? '#fbbf24' : '#fde047'}
+        animation={isNight ? 'pulse' : 'spin'}
+        duration={isNight ? 2600 : 22000}
+      />
+    );
   }
-  if (c <= 48) return 'cloudy';
-  if (c <= 67) return 'rainy';
-  if (c <= 77) return 'snow';
-  if (c <= 82) return 'rainy';
-  return 'thunderstorm';
-};
+  // 2. Cloudy / Partly / Overcast (Облачно): Модерн Флат (белоснежное облако + золотое солнце/месяц сзади)
+  if (c <= 3) {
+    return (
+      <View style={iconStyles.cloudWithSunMoon}>
+        <AnimatedWeatherIcon
+          name={isNight ? 'moon' : 'sunny'}
+          size={12}
+          color="#fbbf24"
+          style={iconStyles.sunMoonBack}
+          animation={isNight ? 'pulse' : 'spin'}
+          duration={isNight ? 2600 : 26000}
+        />
+        <Ionicons
+          name="cloud"
+          size={14}
+          color="#FFFFFF"
+          style={iconStyles.cloudFront}
+        />
+      </View>
+    );
+  }
+  // 3. Fog (Туман): облако едва заметно дрейфует
+  if (c <= 48) {
+    return (
+      <AnimatedWeatherIcon
+        name="cloudy"
+        size={16}
+        color="#94a3b8"
+        animation="drift"
+        duration={3600}
+      />
+    );
+  }
+  // 4. Rain (Дождь)
+  if (c <= 67) {
+    return <RainConditionIcon />;
+  }
+  // 5. Snow (Снег): снежинка медленно вращается
+  if (c <= 77) {
+    return (
+      <AnimatedWeatherIcon
+        name="snow"
+        size={16}
+        color="#f0f9ff"
+        animation="spin"
+        duration={16000}
+      />
+    );
+  }
+  // 6. Showers (Ливень)
+  if (c <= 86) {
+    return <RainConditionIcon />;
+  }
+  // 7. Thunder (Гроза): редкие вспышки
+  return (
+    <AnimatedWeatherIcon
+      name="thunderstorm"
+      size={16}
+      color="#facc15"
+      animation="flash"
+    />
+  );
+}
+
+const iconStyles = StyleSheet.create({
+  iconBox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cloudWithSunMoon: {
+    width: 20,
+    height: 16,
+    position: 'relative',
+    justifyContent: 'center',
+  },
+  sunMoonBack: {
+    position: 'absolute',
+    top: -1,
+    right: 0,
+  },
+  cloudFront: {
+    position: 'absolute',
+    bottom: -1,
+    left: 0,
+  },
+  rainWithDrops: {
+    width: 20,
+    height: 16,
+    position: 'relative',
+    justifyContent: 'center',
+  },
+  rainCloud: {
+    position: 'absolute',
+    top: -1,
+    left: 0,
+  },
+  rainFallArea: {
+    position: 'absolute',
+    top: 11,
+    left: 0,
+    width: 20,
+    height: 5,
+    overflow: 'hidden',
+  },
+  rainStreak: {
+    position: 'absolute',
+    top: 0,
+    width: 1.5,
+    height: 3.5,
+    borderRadius: 1,
+    backgroundColor: '#7dd3fc',
+  },
+});
