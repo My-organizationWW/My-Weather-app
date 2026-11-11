@@ -1,5 +1,13 @@
 const pkg = require('./package.json');
 
+// Android requires a strictly increasing integer versionCode, otherwise a
+// patch APK cannot be installed over the previous release. Derive it from the
+// semantic version: 1.0.23 -> 1002300, 1.0.23.1 -> 1002301.
+const [major = 0, minor = 0, patch = 0, micro = 0] = pkg.version
+  .split('.')
+  .map((part) => parseInt(part, 10) || 0);
+const versionCode = major * 1000000 + minor * 10000 + patch * 100 + micro;
+
 export default {
   expo: {
     name: "Моя погода",
@@ -20,6 +28,7 @@ export default {
     },
     android: {
       package: "com.bladvin.myappfinal",
+      versionCode,
       adaptiveIcon: {
         foregroundImage: "./assets/adaptive-icon.png",
         backgroundColor: "#ffffff"
