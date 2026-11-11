@@ -26,7 +26,10 @@ jobs:
         run: yarn install
 
       - name: Check Expo SDK health
-        run: npx -y expo-doctor
+        # Pin the last expo-doctor build that bundles its runtime deps.
+        # 1.21.5+ ships without dependencies and crashes under npx with
+        # "Cannot find module '@expo/env'". 1.21.4 supports Expo SDK 58.
+        run: npx -y expo-doctor@1.21.4
 
       - name: Setup Java JDK
         uses: actions/setup-java@v4
