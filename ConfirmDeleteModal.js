@@ -1,22 +1,48 @@
-import React, { useMemo } from 'react';
-import { Modal, View, Text, StyleSheet, TouchableWithoutFeedback } from 'react-native';
+import React, { useMemo, useEffect, useRef } from 'react';
+import { Modal, View, Text, StyleSheet, TouchableWithoutFeedback, Animated as RNAnimated } from 'react-native';
 import Animated, { LinearTransition } from 'react-native-reanimated';
+import PressableScale from './components/PressableScale';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 import { useFontSize } from './FontSizeContext';
 import { useTranslation } from 'react-i18next';
 import { getPluralSelectedText } from './utils/plural';
-import PressableScale from './components/PressableScale';
+
+function CardScale({ style, children }) {
+  const opacity = useRef(new RNAnimated.Value(0)).current;
+  const scale = useRef(new RNAnimated.Value(0.94)).current;
+
+  useEffect(() => {
+    RNAnimated.parallel([
+      RNAnimated.timing(opacity, {
+        toValue: 1,
+        duration: 160,
+        useNativeDriver: true,
+      }),
+      RNAnimated.spring(scale, {
+        toValue: 1,
+        friction: 9,
+        tension: 140,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [opacity, scale]);
+
+  return (
+    <RNAnimated.View style={[style, { opacity, transform: [{ scale }] }]}>
+      {children}
+    </RNAnimated.View>
+  );
+}
 
 export default function ConfirmDeleteModal({ visible, cityName, count, onCancel, onConfirm }) {
   const { theme } = useTheme();
   const fs = useFontSize();
   const { t } = useTranslation();
+  const isMulti = count > 1;
 
   // Adaptive density: single-city dialog is minimal, multi-city gets room
   // for the prominent count line. Height transitions animate via layout.
-  const isMulti = count > 1;
-
   const styles = useMemo(() => StyleSheet.create({
     backdrop: {
       flex: 1,
@@ -99,6 +125,7 @@ export default function ConfirmDeleteModal({ visible, cityName, count, onCancel,
       <TouchableWithoutFeedback onPress={handleCancel}>
         <View style={styles.backdrop}>
           <TouchableWithoutFeedback>
+            <CardScale style={{ width: '100%', maxWidth: isMulti ? 320 : 296 }}>
             <Animated.View
               style={styles.card}
               layout={LinearTransition.duration(220)}
@@ -142,6 +169,7 @@ export default function ConfirmDeleteModal({ visible, cityName, count, onCancel,
                 </PressableScale>
               </View>
             </Animated.View>
+            </CardScale>
           </TouchableWithoutFeedback>
         </View>
       </TouchableWithoutFeedback>

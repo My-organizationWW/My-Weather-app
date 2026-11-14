@@ -158,6 +158,11 @@ function BottomSheet({ visible, onClose, title, options, selectedValue, onSelect
   const screenHeight = Dimensions.get('window').height;
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  // Keep the sheet mounted while the exit animation plays; `visible` alone
+  // used to unmount it on the same frame, so the close looked like a cut.
+  const [rendered, setRendered] = useState(visible);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
 
   // Swipe-down to dismiss, tracked with raw touch events (same approach as
   // the backup sheet): onTouchMove bubbles from any header child uniformly,
@@ -197,12 +202,9 @@ function BottomSheet({ visible, onClose, title, options, selectedValue, onSelect
     const vy = drag.vy || 0;
     drag.vy = 0;
     if (dy > 110 || vy > 0.7) {
-      Animated.timing(translateY, {
-        toValue: screenHeight,
-        duration: 200,
-        easing: Easing.in(Easing.cubic),
-        useNativeDriver: true,
-      }).start(() => onCloseRef.current());
+      // Let the close effect run the exit animation from the current drag
+      // offset; animating here too would play it twice.
+      onCloseRef.current();
     } else {
       Animated.spring(translateY, {
         toValue: 0,
@@ -212,23 +214,29 @@ function BottomSheet({ visible, onClose, title, options, selectedValue, onSelect
     }
   };
 
+  // Open: mount + slide in. Close: animate out first, then unmount.
   useEffect(() => {
-    if (visible) {
-      translateY.setValue(screenHeight);
-      opacity.setValue(0);
-      Animated.parallel([
-        Animated.timing(opacity, { toValue: 1, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-        Animated.spring(translateY, { toValue: 0, friction: 22, useNativeDriver: true }),
-      ]).start();
-    } else {
-      Animated.parallel([
-        Animated.timing(opacity, { toValue: 0, duration: 160, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
-        Animated.timing(translateY, { toValue: screenHeight, duration: 200, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
-      ]).start(onClose);
-    }
-  }, [visible, translateY, opacity, onClose, screenHeight]);
+    if (!visible) return;
+    setRendered(true);
+    translateY.setValue(screenHeight);
+    opacity.setValue(0);
+    Animated.parallel([
+      Animated.timing(opacity, { toValue: 1, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.spring(translateY, { toValue: 0, friction: 22, useNativeDriver: true }),
+    ]).start();
+  }, [visible, translateY, opacity, screenHeight]);
 
-  if (!visible) return null;
+  useEffect(() => {
+    if (visible || !rendered) return;
+    Animated.parallel([
+      Animated.timing(opacity, { toValue: 0, duration: 160, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(translateY, { toValue: screenHeight, duration: 200, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
+    ]).start(({ finished }) => {
+      if (finished && !visibleRef.current) setRendered(false);
+    });
+  }, [visible, rendered, translateY, opacity, screenHeight]);
+
+  if (!rendered) return null;
 
   return (
     <Modal transparent visible animationType="none" statusBarTranslucent navigationBarTranslucent>
@@ -287,22 +295,32 @@ function BottomSheet({ visible, onClose, title, options, selectedValue, onSelect
 function CenteredModal({ visible, onClose, title, options, selectedValue, onSelect, tr, theme, fs }) {
   const scale = useRef(new Animated.Value(0)).current;
   const opacity = useRef(new Animated.Value(0)).current;
+  const [rendered, setRendered] = useState(visible);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
 
   useEffect(() => {
-    if (visible) {
-      Animated.parallel([
-        Animated.timing(opacity, { toValue: 1, duration: 200, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-        Animated.spring(scale, { toValue: 1, friction: 12, useNativeDriver: true }),
-      ]).start();
-    } else {
-      Animated.parallel([
-        Animated.timing(opacity, { toValue: 0, duration: 140, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
-        Animated.timing(scale, { toValue: 0.92, duration: 160, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
-      ]).start(onClose);
-    }
-  }, [visible, scale, opacity, onClose]);
+    if (!visible) return;
+    setRendered(true);
+    scale.setValue(0.92);
+    opacity.setValue(0);
+    Animated.parallel([
+      Animated.timing(opacity, { toValue: 1, duration: 200, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.spring(scale, { toValue: 1, friction: 12, useNativeDriver: true }),
+    ]).start();
+  }, [visible, scale, opacity]);
 
-  if (!visible) return null;
+  useEffect(() => {
+    if (visible || !rendered) return;
+    Animated.parallel([
+      Animated.timing(opacity, { toValue: 0, duration: 140, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(scale, { toValue: 0.92, duration: 160, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
+    ]).start(({ finished }) => {
+      if (finished && !visibleRef.current) setRendered(false);
+    });
+  }, [visible, rendered, scale, opacity]);
+
+  if (!rendered) return null;
 
   return (
     <Modal transparent visible animationType="none" statusBarTranslucent navigationBarTranslucent>
@@ -520,22 +538,32 @@ function FontSizeSlider({ value, onValueChange, theme, fs }) {
 function FontSizeModal({ visible, onClose, fontScale, setFontScale, tr, theme, fs }) {
   const scale = useRef(new Animated.Value(0)).current;
   const opacity = useRef(new Animated.Value(0)).current;
+  const [rendered, setRendered] = useState(visible);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
 
   useEffect(() => {
-    if (visible) {
-      Animated.parallel([
-        Animated.timing(opacity, { toValue: 1, duration: 200, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-        Animated.spring(scale, { toValue: 1, friction: 12, useNativeDriver: true }),
-      ]).start();
-    } else {
-      Animated.parallel([
-        Animated.timing(opacity, { toValue: 0, duration: 140, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
-        Animated.timing(scale, { toValue: 0.92, duration: 160, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
-      ]).start(onClose);
-    }
-  }, [visible, scale, opacity, onClose]);
+    if (!visible) return;
+    setRendered(true);
+    scale.setValue(0.92);
+    opacity.setValue(0);
+    Animated.parallel([
+      Animated.timing(opacity, { toValue: 1, duration: 200, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
+      Animated.spring(scale, { toValue: 1, friction: 12, useNativeDriver: true }),
+    ]).start();
+  }, [visible, scale, opacity]);
 
-  if (!visible) return null;
+  useEffect(() => {
+    if (visible || !rendered) return;
+    Animated.parallel([
+      Animated.timing(opacity, { toValue: 0, duration: 140, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
+      Animated.timing(scale, { toValue: 0.92, duration: 160, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
+    ]).start(({ finished }) => {
+      if (finished && !visibleRef.current) setRendered(false);
+    });
+  }, [visible, rendered, scale, opacity]);
+
+  if (!rendered) return null;
 
   return (
     <Modal transparent visible animationType="none" statusBarTranslucent navigationBarTranslucent>

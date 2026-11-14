@@ -40,7 +40,10 @@ const SCREEN_H = Dimensions.get('screen').height;
 
 export function useCustomAlert() {
   const [state, setState] = useState(null);
-  const showAlert = useCallback((opts) => setState(opts), []);
+  const nextId = useRef(0);
+  // `_id` lets CustomAlert remount the dialog for every showAlert call, so a
+  // new alert never inherits the previous dialog's closing state.
+  const showAlert = useCallback((opts) => setState({ ...opts, _id: ++nextId.current }), []);
   const hideAlert = useCallback(() => setState(null), []);
   return { alert: state, showAlert, hideAlert };
 }
@@ -100,13 +103,23 @@ function ToastContent({ title, message, onDone, fs }) {
   );
 }
 
-function DialogCard({ style, children }) {
+function AlertDialog({ state, onDismiss, styles }) {
+  const { title, message, icon, buttons = [] } = state;
+  const row = buttons.length === 2;
   const opacity = useRef(new Animated.Value(0)).current;
   const scale = useRef(new Animated.Value(0.92)).current;
   const translateY = useRef(new Animated.Value(10)).current;
+  const dim = useRef(new Animated.Value(0)).current;
+  const closing = useRef(false);
 
   useEffect(() => {
     Animated.parallel([
+      Animated.timing(dim, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
       Animated.timing(opacity, {
         toValue: 1,
         duration: 180,
@@ -126,14 +139,100 @@ function DialogCard({ style, children }) {
         useNativeDriver: true,
       }),
     ]).start();
-  }, [opacity, scale, translateY]);
+  }, [dim, opacity, scale, translateY]);
+
+  // Play a short exit, then hand control back to the caller. Without this the
+  // dialog used to vanish on the same frame the button was pressed.
+  const finish = (after) => {
+    if (closing.current) return;
+    closing.current = true;
+    Animated.parallel([
+      Animated.timing(dim, {
+        toValue: 0,
+        duration: 140,
+        easing: Easing.in(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(opacity, {
+        toValue: 0,
+        duration: 130,
+        easing: Easing.in(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(scale, {
+        toValue: 0.96,
+        duration: 140,
+        easing: Easing.in(Easing.quad),
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      try {
+        onDismiss();
+      } catch (e) {}
+      if (after) {
+        try {
+          after();
+        } catch (e) {}
+      }
+    });
+  };
+
+  const press = (btn) => finish(() => btn.onPress && btn.onPress());
+
+  const cancelFallback = () => {
+    const cancelBtn = buttons.find((b) => b.style === 'cancel');
+    if (cancelBtn) press(cancelBtn);
+    else finish();
+  };
 
   return (
-    <Animated.View
-      style={[style, { opacity, transform: [{ scale }, { translateY }] }]}
+    <Modal
+      transparent
+      visible
+      animationType="none"
+      statusBarTranslucent
+      navigationBarTranslucent
+      onRequestClose={cancelFallback}
     >
-      {children}
-    </Animated.View>
+      <View style={styles.overlay}>
+        <Animated.View
+          pointerEvents="none"
+          style={[StyleSheet.absoluteFillObject, styles.dim, { opacity: dim }]}
+        />
+        <Animated.View
+          style={[styles.card, { opacity, transform: [{ scale }, { translateY }] }]}
+        >
+          {icon ? (
+            <View style={styles.iconWrap}>
+              <Ionicons name={icon.name} size={44} color={icon.color} />
+            </View>
+          ) : null}
+          <Text style={styles.title}>{title}</Text>
+          {message ? <Text style={styles.message}>{message}</Text> : null}
+          <View style={row ? styles.btnRow : styles.btnColumn}>
+            {buttons.map((b, i) => {
+              const isDestructive = b.style === 'destructive';
+              const isGhost = b.style === 'cancel';
+              return (
+                <PressableScale
+                  key={`${b.text}-${i}`}
+                  style={[
+                    styles.btn,
+                    row && styles.btnFlex,
+                    isGhost ? styles.btnGhost : isDestructive ? styles.btnDestructive : styles.btnDefault,
+                  ]}
+                  onPress={() => press(b)}
+                  scaleTo={0.97}
+                  activeOpacity={0.8}
+                >
+                  <Text style={isGhost ? styles.btnGhostText : styles.btnFillText}>{b.text}</Text>
+                </PressableScale>
+              );
+            })}
+          </View>
+        </Animated.View>
+      </View>
+    </Modal>
   );
 }
 
@@ -155,36 +254,16 @@ export default function CustomAlert({ state, onDismiss, theme, fs }) {
     );
   }
 
-  const { title, message, icon, buttons = [] } = state;
-  const row = buttons.length === 2;
-
-  const press = (btn) => {
-    try {
-      onDismiss();
-    } catch (e) {}
-    try {
-      btn.onPress && btn.onPress();
-    } catch (e) {}
-  };
-
-  const cancelFallback = () => {
-    const cancelBtn = buttons.find((b) => b.style === 'cancel');
-    if (cancelBtn) press(cancelBtn);
-    else {
-      try {
-        onDismiss();
-      } catch (e) {}
-    }
-  };
-
   const styles = StyleSheet.create({
     overlay: {
       ...StyleSheet.absoluteFillObject,
       minHeight: SCREEN_H,
-      backgroundColor: 'rgba(0,0,0,0.55)',
       justifyContent: 'center',
       alignItems: 'center',
       paddingHorizontal: 32,
+    },
+    dim: {
+      backgroundColor: 'rgba(0,0,0,0.55)',
     },
     card: {
       width: '100%',
@@ -253,46 +332,11 @@ export default function CustomAlert({ state, onDismiss, theme, fs }) {
   });
 
   return (
-    <Modal
-      transparent
-      visible
-      animationType="fade"
-      statusBarTranslucent
-      navigationBarTranslucent
-      onRequestClose={cancelFallback}
-    >
-      <View style={styles.overlay}>
-        <DialogCard style={styles.card}>
-          {icon ? (
-            <View style={styles.iconWrap}>
-              <Ionicons name={icon.name} size={44} color={icon.color} />
-            </View>
-          ) : null}
-          <Text style={styles.title}>{title}</Text>
-          {message ? <Text style={styles.message}>{message}</Text> : null}
-          <View style={row ? styles.btnRow : styles.btnColumn}>
-            {buttons.map((b, i) => {
-              const isDestructive = b.style === 'destructive';
-              const isGhost = b.style === 'cancel';
-              return (
-                <PressableScale
-                  key={`${b.text}-${i}`}
-                  style={[
-                    styles.btn,
-                    row && styles.btnFlex,
-                    isGhost ? styles.btnGhost : isDestructive ? styles.btnDestructive : styles.btnDefault,
-                  ]}
-                  onPress={() => press(b)}
-                  scaleTo={0.97}
-                  activeOpacity={0.8}
-                >
-                  <Text style={isGhost ? styles.btnGhostText : styles.btnFillText}>{b.text}</Text>
-                </PressableScale>
-              );
-            })}
-          </View>
-        </DialogCard>
-      </View>
-    </Modal>
+    <AlertDialog
+      key={state._id ?? 'alert'}
+      state={state}
+      onDismiss={onDismiss}
+      styles={styles}
+    />
   );
 }

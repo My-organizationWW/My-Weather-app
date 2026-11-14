@@ -1829,7 +1829,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
             onRequestClose={closeMenu}
           >
             <TouchableWithoutFeedback onPress={closeMenu}>
-              <View style={styles.menuBackdrop}>
+              <Animated.View style={[styles.menuBackdrop, { opacity: menuOpacity }]}>
                 <Animated.View
                   style={[
                     styles.dropdownMenu,
@@ -1863,7 +1863,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                     <Text style={[styles.menuItemText, { color: theme.text }]} numberOfLines={1} ellipsizeMode="tail">{tr('settings')}</Text>
                   </PressableScale>
                 </Animated.View>
-              </View>
+              </Animated.View>
             </TouchableWithoutFeedback>
           </Modal>
 
@@ -2467,6 +2467,34 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
   );
 }
 
+function PermissionCard({ style, children }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  const scale = useRef(new Animated.Value(0.92)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(opacity, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.spring(scale, {
+        toValue: 1,
+        friction: 9,
+        tension: 140,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [opacity, scale]);
+
+  return (
+    <Animated.View style={[style, { opacity, transform: [{ scale }] }]}>
+      {children}
+    </Animated.View>
+  );
+}
+
 function PermissionModal({ visible, onClose, onOpenSettings, theme, fs }) {
   const { t: tr } = useTranslation();
   if (!visible) return null;
@@ -2475,7 +2503,7 @@ function PermissionModal({ visible, onClose, onOpenSettings, theme, fs }) {
       <TouchableWithoutFeedback onPress={onClose}>
         <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: 24 }}>
           <TouchableWithoutFeedback>
-            <View style={{ width: '100%', maxWidth: 360, backgroundColor: theme.surfaceAlt || theme.background, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: theme.border || 'rgba(255,255,255,0.1)' }}>
+            <PermissionCard style={{ width: '100%', maxWidth: 360, backgroundColor: theme.surfaceAlt || theme.background, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: theme.border || 'rgba(255,255,255,0.1)' }}>
               <Text style={{ fontSize: fs.base * 1.125, fontWeight: '600', color: theme.text, marginBottom: 8, textAlign: 'center' }}>{tr('permission_required')}</Text>
               <Text style={{ fontSize: fs.base * 0.9375, color: theme.textSecondary || theme.textMuted, marginBottom: 20, lineHeight: 20, textAlign: 'center' }}>{tr('location_permission_message')}</Text>
               <View style={{ flexDirection: 'column', gap: 10 }}>
@@ -2486,7 +2514,7 @@ function PermissionModal({ visible, onClose, onOpenSettings, theme, fs }) {
                   <Text style={{ color: theme.textMuted || theme.textSecondary, fontSize: fs.base * 0.9375, fontWeight: '500' }}>{tr('cancel')}</Text>
                 </PressableScale>
               </View>
-            </View>
+            </PermissionCard>
           </TouchableWithoutFeedback>
         </View>
       </TouchableWithoutFeedback>
