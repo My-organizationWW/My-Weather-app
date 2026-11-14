@@ -29,6 +29,7 @@ import {
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
  import ScreenWrapper from './ScreenWrapper';
+import PressableScale from './components/PressableScale';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, G, Line, Path, RadialGradient, Rect, Stop } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -1024,6 +1025,41 @@ function formatWind(speedKmh, unit) {
   return `${v.toFixed(1)} ${i18n.t(`windLabels.${unit}`) || i18n.t('windLabels.kmh')}`;
 }
 
+// Fade+rise the hero block when the displayed city changes (or on first
+// load). Kept separate from the hourly/weekly lists: those already run
+// dozens of native icon loops and must not be re-mounted.
+function HeroReveal({ trigger, children }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(10)).current;
+
+  useEffect(() => {
+    opacity.setValue(0);
+    translateY.setValue(10);
+    const animation = Animated.parallel([
+      Animated.timing(opacity, {
+        toValue: 1,
+        duration: 260,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(translateY, {
+        toValue: 0,
+        duration: 300,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]);
+    animation.start();
+    return () => animation.stop();
+  }, [trigger, opacity, translateY]);
+
+  return (
+    <Animated.View style={{ opacity, transform: [{ translateY }] }}>
+      {children}
+    </Animated.View>
+  );
+}
+
 export default function App() {
   const { t: tr } = useTranslation();
   const { theme, setThemeMode, themeMode, loaded: themeLoaded } = useTheme();
@@ -1805,25 +1841,27 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                     },
                   ]}
                 >
-                  <TouchableOpacity
+                  <PressableScale
                     style={styles.menuItem}
+                    scaleTo={0.98}
                     onPress={() => {
                       closeMenu();
                       navigation.navigate('CityList');
                     }}
                   >
                     <Text style={[styles.menuItemText, { color: theme.text }]} numberOfLines={1} ellipsizeMode="tail">{tr('cities.title')}</Text>
-                  </TouchableOpacity>
+                  </PressableScale>
                   <View style={[styles.menuDivider, { backgroundColor: theme.border || 'rgba(255,255,255,0.1)' }]} />
-                  <TouchableOpacity
+                  <PressableScale
                     style={styles.menuItem}
+                    scaleTo={0.98}
                     onPress={() => {
                       closeMenu();
                       openSettings();
                     }}
                   >
                     <Text style={[styles.menuItemText, { color: theme.text }]} numberOfLines={1} ellipsizeMode="tail">{tr('settings')}</Text>
-                  </TouchableOpacity>
+                  </PressableScale>
                 </Animated.View>
               </View>
             </TouchableWithoutFeedback>
@@ -1846,9 +1884,9 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
             }
           >
           <View style={styles.searchBarContainer}>
-            <TouchableOpacity onPress={search} style={styles.searchIconWrap} activeOpacity={0.7} hitSlop={6}>
+            <PressableScale onPress={search} style={styles.searchIconWrap} scaleTo={0.88} hitSlop={6}>
               <Ionicons name="search" size={20} color={theme.textMuted || '#94a3b8'} />
-            </TouchableOpacity>
+            </PressableScale>
 
             <View style={styles.inputWrap}>
               <Animated.Text
@@ -1893,38 +1931,41 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
               }}
               pointerEvents={city.length > 0 ? 'auto' : 'none'}
             >
-              <TouchableOpacity
+              <PressableScale
                 onPress={() => setCity('')}
                 style={styles.searchActionBtn}
-                activeOpacity={0.6}
+                scaleTo={0.88}
                 hitSlop={6}
               >
                 <Ionicons name="close-circle" size={18} color={theme.textMuted || 'rgba(255,255,255,0.4)'} />
-              </TouchableOpacity>
+              </PressableScale>
             </Animated.View>
 
-            <TouchableOpacity
+            <PressableScale
               onPress={detectMyLocation}
               disabled={locating}
-              style={[styles.searchActionBtn, locating && { opacity: 0.5 }]}
-              activeOpacity={0.6}
+              disabledOpacity={0.5}
+              style={styles.searchActionBtn}
+              scaleTo={0.88}
               hitSlop={6}
+              haptic
             >
               <Ionicons
                 name="locate-outline"
                 size={22}
                 color={theme.accent || '#38bdf8'}
               />
-            </TouchableOpacity>
+            </PressableScale>
 
-            <TouchableOpacity
+            <PressableScale
               onPress={toggleMenu}
               style={styles.searchActionBtn}
-              activeOpacity={0.6}
+              scaleTo={0.88}
               hitSlop={6}
+              haptic
             >
               <Ionicons name="ellipsis-vertical" size={20} color={theme.text} />
-            </TouchableOpacity>
+            </PressableScale>
           </View>
           {showBanner && (
             <View
@@ -1942,12 +1983,12 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
               >
                 {bannerMessage}
               </Text>
-              <TouchableOpacity style={styles.bannerButton} onPress={retryConnection} disabled={retrying}>
+              <PressableScale style={styles.bannerButton} onPress={retryConnection} disabled={retrying} scaleTo={0.95}>
                 <Text style={styles.bannerButtonText}>{retrying ? '…' : tr('retry')}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.bannerClose} onPress={() => setDismissedMsg(bannerMessage)}>
+              </PressableScale>
+              <PressableScale style={styles.bannerClose} onPress={() => setDismissedMsg(bannerMessage)} scaleTo={0.85}>
                 <Text style={styles.bannerCloseText}>✕</Text>
-              </TouchableOpacity>
+              </PressableScale>
             </View>
           )}
           {/* Cache-First: spinner only when there is nothing to show yet. */}
@@ -1968,7 +2009,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
             </View>
           )}
           {weather && (
-            <View>
+            <HeroReveal trigger={`${weather.place.name}|${weather.place.latitude}|${weather.place.longitude}`}>
               <Text style={styles.cityName}>{weather.place.name}</Text>
               {isStale && weather.savedAt && (
                 <Text style={styles.staleLabel}>
@@ -2079,7 +2120,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                   </Text>
                 </View>
               ))}
-            </View>
+            </HeroReveal>
           )}
            {!loading && !locating && !weather && (
              <View style={styles.center}>
@@ -2438,12 +2479,12 @@ function PermissionModal({ visible, onClose, onOpenSettings, theme, fs }) {
               <Text style={{ fontSize: fs.base * 1.125, fontWeight: '600', color: theme.text, marginBottom: 8, textAlign: 'center' }}>{tr('permission_required')}</Text>
               <Text style={{ fontSize: fs.base * 0.9375, color: theme.textSecondary || theme.textMuted, marginBottom: 20, lineHeight: 20, textAlign: 'center' }}>{tr('location_permission_message')}</Text>
               <View style={{ flexDirection: 'column', gap: 10 }}>
-                <TouchableOpacity onPress={onOpenSettings} style={{ paddingVertical: 12, paddingHorizontal: 16, borderRadius: 8, backgroundColor: theme.accent, alignItems: 'center' }}>
+                <PressableScale onPress={onOpenSettings} style={{ paddingVertical: 12, paddingHorizontal: 16, borderRadius: 8, backgroundColor: theme.accent, alignItems: 'center' }} scaleTo={0.97}>
                   <Text style={{ color: theme.onAccent || '#ffffff', fontSize: fs.base * 0.9375, fontWeight: '600' }}>{tr('open_settings')}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={onClose} style={{ paddingVertical: 12, paddingHorizontal: 16, borderRadius: 8, alignItems: 'center' }}>
+                </PressableScale>
+                <PressableScale onPress={onClose} style={{ paddingVertical: 12, paddingHorizontal: 16, borderRadius: 8, alignItems: 'center' }} scaleTo={0.97}>
                   <Text style={{ color: theme.textMuted || theme.textSecondary, fontSize: fs.base * 0.9375, fontWeight: '500' }}>{tr('cancel')}</Text>
-                </TouchableOpacity>
+                </PressableScale>
               </View>
             </View>
           </TouchableWithoutFeedback>

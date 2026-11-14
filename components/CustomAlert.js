@@ -21,12 +21,13 @@ import {
   View,
   Text,
   Modal,
-  TouchableOpacity,
   Animated,
   Dimensions,
+  Easing,
   StyleSheet,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import PressableScale from './PressableScale';
 
 // On some MIUI builds the Modal content host measures children with
 // wrap-content height instead of fullscreen — then absoluteFill/flex can't
@@ -95,6 +96,43 @@ function ToastContent({ title, message, onDone, fs }) {
       <Ionicons name="checkmark-circle" size={48} color="#38b06b" />
       <Text style={styles.toastTitle}>{title}</Text>
       {message ? <Text style={styles.toastMessage}>{message}</Text> : null}
+    </Animated.View>
+  );
+}
+
+function DialogCard({ style, children }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  const scale = useRef(new Animated.Value(0.92)).current;
+  const translateY = useRef(new Animated.Value(10)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(opacity, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.spring(scale, {
+        toValue: 1,
+        friction: 9,
+        tension: 140,
+        useNativeDriver: true,
+      }),
+      Animated.timing(translateY, {
+        toValue: 0,
+        duration: 220,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [opacity, scale, translateY]);
+
+  return (
+    <Animated.View
+      style={[style, { opacity, transform: [{ scale }, { translateY }] }]}
+    >
+      {children}
     </Animated.View>
   );
 }
@@ -224,7 +262,7 @@ export default function CustomAlert({ state, onDismiss, theme, fs }) {
       onRequestClose={cancelFallback}
     >
       <View style={styles.overlay}>
-        <View style={styles.card}>
+        <DialogCard style={styles.card}>
           {icon ? (
             <View style={styles.iconWrap}>
               <Ionicons name={icon.name} size={44} color={icon.color} />
@@ -237,7 +275,7 @@ export default function CustomAlert({ state, onDismiss, theme, fs }) {
               const isDestructive = b.style === 'destructive';
               const isGhost = b.style === 'cancel';
               return (
-                <TouchableOpacity
+                <PressableScale
                   key={`${b.text}-${i}`}
                   style={[
                     styles.btn,
@@ -245,14 +283,15 @@ export default function CustomAlert({ state, onDismiss, theme, fs }) {
                     isGhost ? styles.btnGhost : isDestructive ? styles.btnDestructive : styles.btnDefault,
                   ]}
                   onPress={() => press(b)}
-                  activeOpacity={0.7}
+                  scaleTo={0.97}
+                  activeOpacity={0.8}
                 >
                   <Text style={isGhost ? styles.btnGhostText : styles.btnFillText}>{b.text}</Text>
-                </TouchableOpacity>
+                </PressableScale>
               );
             })}
           </View>
-        </View>
+        </DialogCard>
       </View>
     </Modal>
   );

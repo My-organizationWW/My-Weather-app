@@ -3,9 +3,7 @@ import {
   View,
   Text,
   ScrollView,
-  TouchableOpacity,
   TouchableWithoutFeedback,
-  Switch,
   Image,
   Linking,
   Modal,
@@ -32,6 +30,8 @@ import * as Haptics from 'expo-haptics';
 import CrashLogViewer from './components/CrashLogViewer';
 import CitiesImportModal from './components/CitiesImportModal';
 import CustomAlert, { useCustomAlert } from './components/CustomAlert';
+import AnimatedSwitch from './components/AnimatedSwitch';
+import PressableScale from './components/PressableScale';
 
 const REMEMBER_CITY_ENABLED_KEY = 'remember_city_enabled';
 
@@ -263,11 +263,11 @@ function BottomSheet({ visible, onClose, title, options, selectedValue, onSelect
           <Text style={{ fontSize: 15, fontWeight: '600', color: theme.textMuted, textAlign: 'center', marginBottom: 14 }}>{title}</Text>
         </View>
         {options.map((opt) => (
-          <TouchableOpacity
+          <PressableScale
             key={opt.value}
             style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 11, paddingHorizontal: 16 }}
             onPress={() => { onSelect(opt.value); onClose(); }}
-            activeOpacity={0.6}
+            scaleTo={0.98}
           >
             <View style={selectedValue === opt.value ? {
               width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: theme.accent, alignItems: 'center', justifyContent: 'center', marginRight: 10,
@@ -277,7 +277,7 @@ function BottomSheet({ visible, onClose, title, options, selectedValue, onSelect
               {selectedValue === opt.value && <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: theme.accent }} />}
             </View>
             <Text style={{ fontSize: 15, fontWeight: '600', color: theme.text, flex: 1 }}>{tr(opt.labelKey)}</Text>
-          </TouchableOpacity>
+          </PressableScale>
         ))}
       </Animated.View>
     </Modal>
@@ -337,11 +337,11 @@ function CenteredModal({ visible, onClose, title, options, selectedValue, onSele
         }}>
           <Text style={{ fontSize: fs.small * 0.9375, fontWeight: '600', color: theme.textMuted, textAlign: 'center', marginBottom: fs.spacing * 0.875 }}>{title}</Text>
           {options.map((opt) => (
-            <TouchableOpacity
+            <PressableScale
               key={opt.value}
               style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: fs.spacing * 0.6875 }}
               onPress={() => { onSelect(opt.value); onClose(); }}
-              activeOpacity={0.6}
+              scaleTo={0.98}
             >
               <View style={selectedValue === opt.value ? {
                 width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: theme.accent, alignItems: 'center', justifyContent: 'center', marginRight: 12,
@@ -354,7 +354,7 @@ function CenteredModal({ visible, onClose, title, options, selectedValue, onSele
                 <Text style={{ fontSize: fs.base * 0.9375, fontWeight: '600', color: theme.text }}>{tr(opt.labelKey)}</Text>
                 {opt.descKey ? <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted, marginTop: fs.spacing * 0.125 }}>{tr(opt.descKey)}</Text> : null}
               </View>
-            </TouchableOpacity>
+            </PressableScale>
           ))}
         </View>
       </Animated.View>
@@ -363,26 +363,65 @@ function CenteredModal({ visible, onClose, title, options, selectedValue, onSele
 }
 
 function InlinePicker({ visible, options, selectedValue, onSelect, onClose, tr, theme, styles, fs }) {
-  if (!visible) return null;
+  const progress = useRef(new Animated.Value(visible ? 1 : 0)).current;
+  const [contentHeight, setContentHeight] = useState(0);
+  const gap = fs.spacing * 0.375;
+
+  useEffect(() => {
+    if (!contentHeight) return;
+    Animated.timing(progress, {
+      toValue: visible ? 1 : 0,
+      duration: visible ? 220 : 160,
+      easing: visible ? Easing.out(Easing.cubic) : Easing.in(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+  }, [visible, contentHeight, progress]);
+
+  const height = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, contentHeight || 0],
+  });
+  const opacity = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, 1],
+  });
+
   return (
-    <View style={{ backgroundColor: theme.surfaceAlt, borderRadius: 16, overflow: 'hidden', marginTop: fs.spacing * 0.375 }}>
-      {options.map((opt) => (
-        <TouchableOpacity
-          key={opt.value}
-          style={[styles.pickerOption, { paddingVertical: fs.spacing * 0.6875, paddingHorizontal: fs.spacing }]}
-          onPress={() => { onSelect(opt.value); onClose(); }}
-          activeOpacity={0.6}
-        >
-          <View style={selectedValue === opt.value ? styles.radioOuter : styles.radioOuterInactive}>
-            {selectedValue === opt.value && <View style={styles.radioInner} />}
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={{ fontSize: fs.base, lineHeight: fs.base * 1.3, fontWeight: '600', color: theme.text }}>{tr(opt.labelKey)}</Text>
-            {opt.descKey ? <Text style={{ fontSize: fs.small, lineHeight: fs.small * 1.3, color: theme.textMuted, marginTop: fs.spacing * 0.125 }}>{tr(opt.descKey)}</Text> : null}
-          </View>
-        </TouchableOpacity>
-      ))}
-    </View>
+    <Animated.View
+      style={{ height: contentHeight ? height : 0, opacity, overflow: 'hidden', position: 'relative' }}
+      pointerEvents={visible ? 'auto' : 'none'}
+      accessibilityElementsHidden={!visible}
+      importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}
+    >
+      <View
+        style={{ position: 'absolute', top: 0, left: 0, right: 0, paddingTop: gap }}
+        onLayout={(event) => {
+          const nextHeight = Math.round(event.nativeEvent.layout.height);
+          if (nextHeight > 0 && nextHeight !== contentHeight) {
+            setContentHeight(nextHeight);
+          }
+        }}
+      >
+        <View style={{ backgroundColor: theme.surfaceAlt, borderRadius: 16 }}>
+          {options.map((opt) => (
+            <PressableScale
+              key={opt.value}
+              style={[styles.pickerOption, { paddingVertical: fs.spacing * 0.6875, paddingHorizontal: fs.spacing }]}
+              onPress={() => { onSelect(opt.value); onClose(); }}
+              scaleTo={0.98}
+            >
+              <View style={selectedValue === opt.value ? styles.radioOuter : styles.radioOuterInactive}>
+                {selectedValue === opt.value && <View style={styles.radioInner} />}
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: fs.base, lineHeight: fs.base * 1.3, fontWeight: '600', color: theme.text }}>{tr(opt.labelKey)}</Text>
+                {opt.descKey ? <Text style={{ fontSize: fs.small, lineHeight: fs.small * 1.3, color: theme.textMuted, marginTop: fs.spacing * 0.125 }}>{tr(opt.descKey)}</Text> : null}
+              </View>
+            </PressableScale>
+          ))}
+        </View>
+      </View>
+    </Animated.View>
   );
 }
 
@@ -549,12 +588,22 @@ function FontSizeModal({ visible, onClose, fontScale, setFontScale, tr, theme, f
 function SettingsMenuWrapper({
   menuStyle, visible, onClose, title, options, selectedValue, onSelect, tr, theme, insets, styles, icon, desc, fs,
 }) {
-  const chevronDir = visible && menuStyle === 'inline' ? '▲' : '›';
+  const chevronAnim = useRef(new Animated.Value(visible && menuStyle === 'inline' ? 1 : 0)).current;
+
+  useEffect(() => {
+    Animated.timing(chevronAnim, {
+      toValue: visible && menuStyle === 'inline' ? 1 : 0,
+      duration: 180,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  }, [visible, menuStyle, chevronAnim]);
 
   return (
     <>
-      <TouchableOpacity
+      <PressableScale
         style={styles.card}
+        scaleTo={0.98}
         onPress={() => {
           if (menuStyle === 'inline') {
             if (visible) onClose(); else onSelect(null);
@@ -570,10 +619,26 @@ function SettingsMenuWrapper({
           <Text style={styles.cardTitle}>{title}</Text>
           <Text style={styles.cardDesc}>{desc}</Text>
         </View>
-        <Text style={styles.chevron}>{chevronDir}</Text>
-      </TouchableOpacity>
+        <Animated.Text
+          style={[
+            styles.chevron,
+            {
+              transform: [
+                {
+                  rotate: chevronAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: ['0deg', '-90deg'],
+                  }),
+                },
+              ],
+            },
+          ]}
+        >
+          ›
+        </Animated.Text>
+      </PressableScale>
 
-      {menuStyle === 'inline' && visible && (
+      {menuStyle === 'inline' && (
         <InlinePicker
           visible={visible}
           options={options}
@@ -859,9 +924,9 @@ export default function SettingsScreen() {
   return (
     <ScreenWrapper>
          <View style={styles.header}>
-        <TouchableOpacity style={styles.headerBtn} onPress={() => navigation.goBack()} activeOpacity={0.7}>
+        <PressableScale style={styles.headerBtn} onPress={() => navigation.goBack()} scaleTo={0.9} haptic>
           <Text style={styles.headerBtnText}>←</Text>
-        </TouchableOpacity>
+        </PressableScale>
         <Text style={styles.headerTitle}>{tr('about')}</Text>
       </View>
 
@@ -887,13 +952,13 @@ export default function SettingsScreen() {
               <Text style={styles.cardTitle}>{tr('rememberCity')}</Text>
               <Text style={styles.cardDesc}>{tr('rememberCityDesc')}</Text>
             </View>
-            <Switch
+            <AnimatedSwitch
               style={{ flexShrink: 0, alignSelf: 'center', marginLeft: 10 }}
               value={rememberCity}
               onValueChange={toggleRemember}
               trackColor={{ false: theme.textMuted, true: theme.accent2 }}
               thumbColor="#ffffff"
-              ios_backgroundColor={theme.textMuted}
+              accessibilityLabel={tr('rememberCity')}
             />
           </View>
           <View style={styles.card}>
@@ -901,13 +966,13 @@ export default function SettingsScreen() {
               <Text style={styles.cardTitle}>{tr('confirmDelete')}</Text>
               <Text style={styles.cardDesc}>{tr('confirmDeleteDesc')}</Text>
             </View>
-            <Switch
+            <AnimatedSwitch
               style={{ flexShrink: 0, alignSelf: 'center', marginLeft: 10 }}
               value={confirmDelete}
               onValueChange={toggleConfirmDelete}
               trackColor={{ false: theme.textMuted, true: theme.accent2 }}
               thumbColor="#ffffff"
-              ios_backgroundColor={theme.textMuted}
+              accessibilityLabel={tr('confirmDelete')}
             />
           </View>
           <View style={styles.card}>
@@ -915,13 +980,13 @@ export default function SettingsScreen() {
               <Text style={styles.cardTitle}>{tr('showSource')}</Text>
               <Text style={styles.cardDesc}>{tr('showSourceDesc')}</Text>
             </View>
-            <Switch
+            <AnimatedSwitch
               style={{ flexShrink: 0, alignSelf: 'center', marginLeft: 10 }}
               value={!!showSourceBadge}
               onValueChange={setShowSourceBadge}
               trackColor={{ false: theme.textMuted, true: theme.accent2 }}
               thumbColor="#ffffff"
-              ios_backgroundColor={theme.textMuted}
+              accessibilityLabel={tr('showSource')}
             />
           </View>
         </View>
@@ -979,7 +1044,7 @@ export default function SettingsScreen() {
             fs={fs}
           />
 
-          <TouchableOpacity style={styles.card} onPress={() => setShowFontSizePicker(true)} activeOpacity={0.6}>
+          <PressableScale style={styles.card} scaleTo={0.98} onPress={() => setShowFontSizePicker(true)}>
             <View style={styles.iconWrap}>
               <Ionicons name="text" size={fs.iconSize * 0.77} color={theme.textSecondary} />
             </View>
@@ -989,7 +1054,7 @@ export default function SettingsScreen() {
             </View>
             <Text style={[styles.cardDesc, { marginRight: 8 }]}>{`${Math.round(fontScale * 100)}%`}</Text>
             <Text style={styles.chevron}>›</Text>
-          </TouchableOpacity>
+          </PressableScale>
         </View>
         <View style={styles.cardStack}>
           <SettingsMenuWrapper
@@ -1029,9 +1094,9 @@ export default function SettingsScreen() {
 
         <Text style={styles.sectionTitle}>{tr('aboutProject')}</Text>
         <View style={styles.cardStack}>
-          <TouchableOpacity
+          <PressableScale
             style={styles.card}
-            activeOpacity={0.6}
+            scaleTo={0.98}
             onPress={openGitHub}
           >
             <View style={styles.iconWrap}>
@@ -1042,8 +1107,8 @@ export default function SettingsScreen() {
               <Text style={styles.cardDesc}>{tr('githubDesc')}</Text>
             </View>
             <Text style={styles.chevron}>›</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.card} activeOpacity={0.6} onPress={() => navigation.navigate('NetDiag')}>
+          </PressableScale>
+          <PressableScale style={styles.card} scaleTo={0.98} onPress={() => navigation.navigate('NetDiag')}>
             <View style={styles.iconWrap}>
               <Ionicons name="pulse" size={fs.iconSize * 0.77} color={theme.text} />
             </View>
@@ -1052,10 +1117,10 @@ export default function SettingsScreen() {
               <Text style={styles.cardDesc}>{tr('netdiagDesc')}</Text>
             </View>
             <Text style={styles.chevron}>›</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
+          </PressableScale>
+          <PressableScale
             style={styles.card}
-            activeOpacity={0.6}
+            scaleTo={0.98}
             onPress={() => setShowImportModal(menuStyle === 'inline' ? !showImportModal : true)}
           >
             <View style={styles.iconWrap}>
@@ -1066,7 +1131,7 @@ export default function SettingsScreen() {
               <Text style={styles.cardDesc}>{tr('backupDesc')}</Text>
             </View>
             <Text style={styles.chevron}>{showImportModal && menuStyle === 'inline' ? '▲' : '›'}</Text>
-          </TouchableOpacity>
+          </PressableScale>
           {menuStyle === 'inline' && (
             <CitiesImportModal
               visible={showImportModal}
@@ -1086,9 +1151,9 @@ export default function SettingsScreen() {
             />
           )}
           {devUnlocked ? (
-            <TouchableOpacity
+            <PressableScale
               style={styles.card}
-              activeOpacity={0.6}
+              scaleTo={0.98}
               onPress={() => setShowLogViewer(true)}
               onLongPress={handleDevLock}
               delayLongPress={800}
@@ -1101,7 +1166,7 @@ export default function SettingsScreen() {
                 <Text style={[styles.cardDesc, { marginLeft: 10, marginTop: 0, flexShrink: 0, marginRight: 8 }]} numberOfLines={1}>Просмотр и отправка</Text>
               </View>
               <Text style={styles.chevron}>›</Text>
-            </TouchableOpacity>
+            </PressableScale>
           ) : null}
         </View>
       </ScrollView>

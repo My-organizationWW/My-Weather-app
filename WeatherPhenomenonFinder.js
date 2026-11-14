@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { View, Text, FlatList, TouchableOpacity, ActivityIndicator, StyleSheet, Animated } from 'react-native';
+import { View, Text, FlatList, ActivityIndicator, StyleSheet, Animated, Easing } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { useTranslation } from 'react-i18next';
@@ -7,6 +7,8 @@ import Svg, { Circle, Path } from 'react-native-svg';
 import { useFontSize } from './FontSizeContext';
 import { useTheme } from './ThemeContext';
 import { fetchForecast } from './utils/weatherProviders';
+import PressableScale from './components/PressableScale';
+import FadeSlideIn from './components/FadeSlideIn';
 
 // Throwing fetch with a 10s cap for the provider layer (plain fetch would
 // hang for OS-level minutes on blackholed routes — the old endless
@@ -86,6 +88,40 @@ function SearchTabIcon({ color = '#fbbf24', size = 26 }) {
   );
 }
 
+function PhenomenonChip({ label, active, onPress, theme, styles }) {
+  const progress = useRef(new Animated.Value(active ? 1 : 0)).current;
+
+  useEffect(() => {
+    Animated.timing(progress, {
+      toValue: active ? 1 : 0,
+      duration: 180,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: false,
+    }).start();
+  }, [active, progress]);
+
+  const backgroundColor = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [theme.surface, theme.surfaceAlt],
+  });
+  const borderColor = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['rgba(0,0,0,0)', theme.accent],
+  });
+  const color = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [theme.textSecondary, theme.accent],
+  });
+
+  return (
+    <PressableScale onPress={onPress} scaleTo={0.97} activeOpacity={0.9}>
+      <Animated.View style={[styles.phenomenonButton, { backgroundColor, borderColor }]}>
+        <Animated.Text style={[styles.phenomenonButtonText, { color }]}>{label}</Animated.Text>
+      </Animated.View>
+    </PressableScale>
+  );
+}
+
 export default function WeatherPhenomenonFinder() {
   const navigation = useNavigation();
   const { t } = useTranslation();
@@ -127,6 +163,8 @@ export default function WeatherPhenomenonFinder() {
     phenomenonButton: {
       backgroundColor: theme.surface,
       borderRadius: 12,
+      borderWidth: 2,
+      borderColor: 'transparent',
       paddingVertical: fs.spacing * 0.9375,
       paddingHorizontal: fs.spacing * 1.25,
       alignItems: 'center',
@@ -259,38 +297,39 @@ export default function WeatherPhenomenonFinder() {
     handleSearch(key);
   };
 
-  const renderButton = (key) => {
+  const renderButton = (key, index) => {
     const isActive = selectedPhenomenon === key;
     return (
-      <TouchableOpacity
-        key={key}
-        style={[styles.phenomenonButton, isActive && styles.phenomenonButtonActive]}
-        onPress={() => handlePress(key)}
-        activeOpacity={0.7}
-      >
-        <Text style={[styles.phenomenonButtonText, isActive && styles.phenomenonButtonTextActive]}>
-          {t(`phenomenon.${key}`)}
-        </Text>
-      </TouchableOpacity>
+      <FadeSlideIn key={key} delay={index * 30} distance={6}>
+        <PhenomenonChip
+          label={t(`phenomenon.${key}`)}
+          active={isActive}
+          onPress={() => handlePress(key)}
+          theme={theme}
+          styles={styles}
+        />
+      </FadeSlideIn>
     );
   };
 
-  const renderItem = ({ item }) => (
-    <TouchableOpacity
-      style={styles.resultCard}
-      onPress={() => navigation.navigate('weather', { city: item.name })}
-      activeOpacity={0.7}
-    >
-      <Text style={styles.resultCity}>{item.name}</Text>
-      <Text style={styles.resultTemp}>{item.temperature}°</Text>
-    </TouchableOpacity>
+  const renderItem = ({ item, index }) => (
+    <FadeSlideIn delay={index * 40} distance={6}>
+      <PressableScale
+        style={styles.resultCard}
+        onPress={() => navigation.navigate('weather', { city: item.name })}
+        scaleTo={0.97}
+      >
+        <Text style={styles.resultCity}>{item.name}</Text>
+        <Text style={styles.resultTemp}>{item.temperature}°</Text>
+      </PressableScale>
+    </FadeSlideIn>
   );
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <Animated.Text style={[styles.title, { opacity: titleOpacity }]}>{t('weatherByPhenomena')}</Animated.Text>
       <View style={styles.buttonContainer}>
-        {PHENOMENA_KEYS.map((key) => renderButton(key))}
+        {PHENOMENA_KEYS.map((key, index) => renderButton(key, index))}
       </View>
       {loading && (
         <View style={styles.loadingContainer}>

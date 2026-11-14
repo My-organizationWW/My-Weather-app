@@ -1,11 +1,12 @@
 import React, { useMemo } from 'react';
-import { Modal, View, Text, TouchableOpacity, StyleSheet, TouchableWithoutFeedback } from 'react-native';
+import { Modal, View, Text, StyleSheet, TouchableWithoutFeedback } from 'react-native';
 import Animated, { LinearTransition } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 import { useFontSize } from './FontSizeContext';
 import { useTranslation } from 'react-i18next';
 import { getPluralSelectedText } from './utils/plural';
+import PressableScale from './components/PressableScale';
 
 export default function ConfirmDeleteModal({ visible, cityName, count, onCancel, onConfirm }) {
   const { theme } = useTheme();
@@ -118,24 +119,27 @@ export default function ConfirmDeleteModal({ visible, cityName, count, onCancel,
                 </Text>
               ) : null}
               <View style={styles.buttonRow}>
-                <TouchableOpacity
+                <PressableScale
                   style={[styles.button, { backgroundColor: theme.surfaceAlt }]}
                   onPress={handleCancel}
-                  activeOpacity={0.7}
+                  scaleTo={0.96}
+                  activeOpacity={0.85}
                 >
                   <Text style={[styles.buttonText, { color: theme.textMuted }]}>
                     {t('cities.cancel')}
                   </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
+                </PressableScale>
+                <PressableScale
                   style={[styles.button, { backgroundColor: theme.danger || '#FF453A' }]}
                   onPress={handleConfirm}
-                  activeOpacity={0.7}
+                  scaleTo={0.96}
+                  activeOpacity={0.85}
+                  haptic
                 >
                   <Text style={[styles.buttonText, { color: '#FFFFFF', fontWeight: '700' }]}>
                     {t('cities.delete')}
                   </Text>
-                </TouchableOpacity>
+                </PressableScale>
               </View>
             </Animated.View>
           </TouchableWithoutFeedback>
