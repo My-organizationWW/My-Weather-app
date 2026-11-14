@@ -1060,6 +1060,60 @@ function HeroReveal({ trigger, children }) {
   );
 }
 
+// Crossfades between text values (temperature, condition, day/night) so a
+// refresh or a unit change reads as a transition instead of a hard swap.
+// Positioned absolutely inside a sized box to avoid layout jumps.
+function CrossfadeValue({ style, value }) {
+  const [current, setCurrent] = useState(value);
+  const [previous, setPrevious] = useState(null);
+  const currentOpacity = useRef(new Animated.Value(1)).current;
+  const previousOpacity = useRef(new Animated.Value(0)).current;
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      setCurrent(value);
+      return;
+    }
+    if (value === current) return;
+    setPrevious(current);
+    setCurrent(value);
+    previousOpacity.setValue(1);
+    currentOpacity.setValue(0);
+    Animated.parallel([
+      Animated.timing(currentOpacity, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(previousOpacity, {
+        toValue: 0,
+        duration: 160,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      if (finished) setPrevious(null);
+    });
+  }, [value, current, currentOpacity, previousOpacity]);
+
+  return (
+    <View>
+      {previous !== null && (
+        <Animated.Text
+          style={[style, { position: 'absolute', top: 0, left: 0, right: 0, opacity: previousOpacity }]}
+          pointerEvents="none"
+        >
+          {previous}
+        </Animated.Text>
+      )}
+      <Animated.Text style={[style, { opacity: currentOpacity }]}>{current}</Animated.Text>
+    </View>
+  );
+}
+
 export default function App() {
   const { t: tr } = useTranslation();
   const { theme, setThemeMode, themeMode, loaded: themeLoaded } = useTheme();
@@ -2047,21 +2101,27 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                   <WeatherIcon type={currentType} isNight={currentIsNight} size={100} />
                 )}
               </View>
-              <Text style={styles.temperature}>
-                 {formatTemp(weather.data.current_weather.temperature, tempUnit)}
-              </Text>
-              <Text style={styles.condition}>
-                {conditionFor(weather.data.current_weather.weathercode)}
-              </Text>
+              <CrossfadeValue
+                style={styles.temperature}
+                value={formatTemp(weather.data.current_weather.temperature, tempUnit)}
+              />
+              <CrossfadeValue
+                style={styles.condition}
+                value={conditionFor(weather.data.current_weather.weathercode)}
+              />
               <View style={styles.detailRow}>
                 <View style={styles.detailCard}>
-                   <Text style={styles.detailValue}>{formatWind(weather.data.current_weather.windspeed, windUnit)}</Text>
+                   <CrossfadeValue
+                     style={styles.detailValue}
+                     value={formatWind(weather.data.current_weather.windspeed, windUnit)}
+                   />
                    <Text style={styles.detailLabel}>{tr('wind')}</Text>
                 </View>
                 <View style={styles.detailCard}>
-                  <Text style={styles.detailValue}>
-                     {weather.data.current_weather.is_day ? tr('day') : tr('night')}
-                  </Text>
+                  <CrossfadeValue
+                    style={styles.detailValue}
+                    value={weather.data.current_weather.is_day ? tr('day') : tr('night')}
+                  />
                    <Text style={styles.detailLabel}>{tr('timeOfDay')}</Text>
                 </View>
                </View>

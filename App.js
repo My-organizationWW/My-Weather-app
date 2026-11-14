@@ -2,7 +2,7 @@ import React, { createContext, useState, useEffect, useRef } from 'react';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { Text, View, Animated, StatusBar, StyleSheet } from 'react-native';
+import { View, Animated, Easing, StatusBar, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { enableFreeze } from 'react-native-screens';
@@ -130,6 +130,10 @@ function AnimatedTabBar({ state, descriptors, navigation, style }) {
   const { t } = useTranslation();
   const { base, iconSize } = useFontSize();
   const animationValues = useRef(state.routes.map(() => new Animated.Value(1))).current;
+  // Focus cross-fade per tab (0 = muted, 1 = accent), for the label colour.
+  const focusValues = useRef(state.routes.map((route) => new Animated.Value(
+    route.name === state.routes[state.index].name ? 1 : 0
+  ))).current;
 
   const focusedOptions = descriptors[state.routes[state.index].key]?.options ?? {};
   const displayStyle = StyleSheet.flatten(focusedOptions?.tabBarStyle ?? {})?.display ?? 'flex';
@@ -140,6 +144,12 @@ function AnimatedTabBar({ state, descriptors, navigation, style }) {
         toValue: index === state.index ? 1.12 : 1,
         friction: 6,
         tension: 140,
+        useNativeDriver: true,
+      }).start();
+      Animated.timing(focusValues[index], {
+        toValue: index === state.index ? 1 : 0,
+        duration: 180,
+        easing: Easing.out(Easing.quad),
         useNativeDriver: true,
       }).start();
     });
@@ -210,16 +220,19 @@ function AnimatedTabBar({ state, descriptors, navigation, style }) {
                 <IconComponent color={iconColor} size={iconSize * 0.8} />
               </Animated.View>
             </View>
-            <Text
+            <Animated.Text
               style={{
                 fontSize: base * 0.6875,
                 fontWeight: '600',
-                color: iconColor,
                 marginTop: 0,
+                color: focusValues[index].interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [theme.textMuted, theme.accent],
+                }),
               }}
             >
               {label}
-            </Text>
+            </Animated.Text>
           </PressableScale>
         );
       })}

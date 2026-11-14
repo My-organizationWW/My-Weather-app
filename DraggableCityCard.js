@@ -12,6 +12,7 @@ import Animated, {
   useReducedMotion,
   Easing,
   runOnJS,
+  FadeIn,
 } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -364,9 +365,13 @@ export default function DraggableCityCard({
                   isSelected && { backgroundColor: theme.tint || '#3a7bd5', borderColor: theme.tint || '#3a7bd5' },
                 ]}
                 hitSlop={8}
-                 onPress={() => onSelectToggle(safeItem.id, safeItem.name, index)}
+                onPress={() => onSelectToggle(safeItem.id, safeItem.name, index)}
               >
-                {isSelected && <Ionicons name="checkmark" size={16} color="#FFFFFF" />}
+                {isSelected && (
+                  <Animated.View entering={FadeIn.duration(150)}>
+                    <Ionicons name="checkmark" size={16} color="#FFFFFF" />
+                  </Animated.View>
+                )}
               </Pressable>
             </Animated.View>
           </Animated.View>
