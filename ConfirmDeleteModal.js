@@ -8,7 +8,7 @@ import { useFontSize } from './FontSizeContext';
 import { useTranslation } from 'react-i18next';
 import { getPluralSelectedText } from './utils/plural';
 
-function CardScale({ style, children }) {
+function CardScale({ style, children, ...rest }) {
   const opacity = useRef(new RNAnimated.Value(0)).current;
   const scale = useRef(new RNAnimated.Value(0.94)).current;
 
@@ -29,7 +29,10 @@ function CardScale({ style, children }) {
   }, [opacity, scale]);
 
   return (
-    <RNAnimated.View style={[style, { opacity, transform: [{ scale }] }]}>
+    // `...rest` is load-bearing: TouchableWithoutFeedback wraps this card to
+    // swallow taps meant for the dialog, and it can only do that if the
+    // responder props reach the underlying native view.
+    <RNAnimated.View {...rest} style={[style, { opacity, transform: [{ scale }] }]}>
       {children}
     </RNAnimated.View>
   );

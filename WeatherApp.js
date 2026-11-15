@@ -2528,7 +2528,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
   );
 }
 
-function PermissionCard({ style, children }) {
+function PermissionCard({ style, children, ...rest }) {
   const opacity = useRef(new Animated.Value(0)).current;
   const scale = useRef(new Animated.Value(0.92)).current;
 
@@ -2550,7 +2550,9 @@ function PermissionCard({ style, children }) {
   }, [opacity, scale]);
 
   return (
-    <Animated.View style={[style, { opacity, transform: [{ scale }] }]}>
+    // Forward the responder props so the inner TouchableWithoutFeedback can
+    // keep card taps from falling through to the backdrop's close handler.
+    <Animated.View {...rest} style={[style, { opacity, transform: [{ scale }] }]}>
       {children}
     </Animated.View>
   );
