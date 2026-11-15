@@ -293,88 +293,102 @@ function BottomSheet({ visible, onClose, title, options, selectedValue, onSelect
 }
 
 function CenteredModal({ visible, onClose, title, options, selectedValue, onSelect, tr, theme, fs }) {
-  const scale = useRef(new Animated.Value(0)).current;
-  const opacity = useRef(new Animated.Value(0)).current;
+  const progress = useRef(new Animated.Value(0)).current;
   const [rendered, setRendered] = useState(visible);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
 
+  // Symmetric in/out: backdrop dims while the window fades in, rises from
+  // 0.9 and lifts 16px; the close plays the exact reverse. Using one
+  // progress value keeps both halves identical instead of two hand-tuned
+  // keyframe sets that drift apart.
   useEffect(() => {
     if (!visible) return;
     setRendered(true);
-    scale.setValue(0.92);
-    opacity.setValue(0);
-    Animated.parallel([
-      Animated.timing(opacity, { toValue: 1, duration: 200, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-      Animated.spring(scale, { toValue: 1, friction: 12, useNativeDriver: true }),
-    ]).start();
-  }, [visible, scale, opacity]);
+    progress.setValue(0);
+    Animated.timing(progress, {
+      toValue: 1,
+      duration: 260,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [visible, progress]);
 
   useEffect(() => {
     if (visible || !rendered) return;
-    Animated.parallel([
-      Animated.timing(opacity, { toValue: 0, duration: 140, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
-      Animated.timing(scale, { toValue: 0.92, duration: 160, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
-    ]).start(({ finished }) => {
+    Animated.timing(progress, {
+      toValue: 0,
+      duration: 170,
+      easing: Easing.in(Easing.cubic),
+      useNativeDriver: true,
+    }).start(({ finished }) => {
       if (finished && !visibleRef.current) setRendered(false);
     });
-  }, [visible, rendered, scale, opacity]);
+  }, [visible, rendered, progress]);
 
   if (!rendered) return null;
 
+  const backdrop = progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
+  const windowOpacity = progress.interpolate({ inputRange: [0, 0.6, 1], outputRange: [0, 1, 1] });
+  const windowScale = progress.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] });
+  const windowY = progress.interpolate({ inputRange: [0, 1], outputRange: [16, 0] });
+
   return (
     <Modal transparent visible animationType="none" statusBarTranslucent navigationBarTranslucent>
-      <TouchableWithoutFeedback onPress={onClose}>
-        <Animated.View style={{ flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.45)', alignItems: 'center', justifyContent: 'center', opacity }} />
-      </TouchableWithoutFeedback>
-      <Animated.View
-        pointerEvents="box-none"
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          alignItems: 'center',
-          justifyContent: 'center',
-          transform: [{ scale }],
-        }}
-      >
-        <View style={{
-          backgroundColor: theme.surface,
-          borderRadius: 20,
-          width: '80%',
-          maxWidth: 300,
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 8 },
-          shadowOpacity: 0.25,
-          shadowRadius: 20,
-          elevation: 24,
-          paddingHorizontal: 18,
-          paddingVertical: 16,
-        }}>
-          <Text style={{ fontSize: fs.small * 0.9375, fontWeight: '600', color: theme.textMuted, textAlign: 'center', marginBottom: fs.spacing * 0.875 }}>{title}</Text>
-          {options.map((opt) => (
-            <PressableScale
-              key={opt.value}
-              style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: fs.spacing * 0.6875 }}
-              onPress={() => { onSelect(opt.value); onClose(); }}
-              scaleTo={0.98}
-            >
-              <View style={selectedValue === opt.value ? {
-                width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: theme.accent, alignItems: 'center', justifyContent: 'center', marginRight: 12,
-              } : {
-                width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: theme.border, alignItems: 'center', justifyContent: 'center', marginRight: 12,
-              }}>
-                {selectedValue === opt.value && <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: theme.accent }} />}
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={{ fontSize: fs.base * 0.9375, fontWeight: '600', color: theme.text }}>{tr(opt.labelKey)}</Text>
-                {opt.descKey ? <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted, marginTop: fs.spacing * 0.125 }}>{tr(opt.descKey)}</Text> : null}
-              </View>
-            </PressableScale>
-          ))}
-        </View>
+      <Animated.View style={StyleSheet.absoluteFill}>
+        <TouchableWithoutFeedback onPress={onClose}>
+          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0, 0, 0, 0.45)', opacity: backdrop }]} />
+        </TouchableWithoutFeedback>
+        <Animated.View
+          pointerEvents="box-none"
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            alignItems: 'center',
+            justifyContent: 'center',
+            opacity: windowOpacity,
+            transform: [{ scale: windowScale }, { translateY: windowY }],
+          }}
+        >
+          <View style={{
+            backgroundColor: theme.surface,
+            borderRadius: 20,
+            width: '80%',
+            maxWidth: 300,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 8 },
+            shadowOpacity: 0.25,
+            shadowRadius: 20,
+            elevation: 24,
+            paddingHorizontal: 18,
+            paddingVertical: 16,
+          }}>
+            <Text style={{ fontSize: fs.small * 0.9375, fontWeight: '600', color: theme.textMuted, textAlign: 'center', marginBottom: fs.spacing * 0.875 }}>{title}</Text>
+            {options.map((opt) => (
+              <PressableScale
+                key={opt.value}
+                style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: fs.spacing * 0.6875 }}
+                onPress={() => { onSelect(opt.value); onClose(); }}
+                scaleTo={0.98}
+              >
+                <View style={selectedValue === opt.value ? {
+                  width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: theme.accent, alignItems: 'center', justifyContent: 'center', marginRight: 12,
+                } : {
+                  width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: theme.border, alignItems: 'center', justifyContent: 'center', marginRight: 12,
+                }}>
+                  {selectedValue === opt.value && <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: theme.accent }} />}
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: fs.base * 0.9375, fontWeight: '600', color: theme.text }}>{tr(opt.labelKey)}</Text>
+                  {opt.descKey ? <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted, marginTop: fs.spacing * 0.125 }}>{tr(opt.descKey)}</Text> : null}
+                </View>
+              </PressableScale>
+            ))}
+          </View>
+        </Animated.View>
       </Animated.View>
     </Modal>
   );
@@ -536,78 +550,91 @@ function FontSizeSlider({ value, onValueChange, theme, fs }) {
 }
 
 function FontSizeModal({ visible, onClose, fontScale, setFontScale, tr, theme, fs }) {
-  const scale = useRef(new Animated.Value(0)).current;
-  const opacity = useRef(new Animated.Value(0)).current;
+  const progress = useRef(new Animated.Value(0)).current;
   const [rendered, setRendered] = useState(visible);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
 
+  // Same symmetric motion as the option pickers, so every centered dialog
+  // in Settings opens and closes the same way.
   useEffect(() => {
     if (!visible) return;
     setRendered(true);
-    scale.setValue(0.92);
-    opacity.setValue(0);
-    Animated.parallel([
-      Animated.timing(opacity, { toValue: 1, duration: 200, easing: Easing.out(Easing.cubic), useNativeDriver: true }),
-      Animated.spring(scale, { toValue: 1, friction: 12, useNativeDriver: true }),
-    ]).start();
-  }, [visible, scale, opacity]);
+    progress.setValue(0);
+    Animated.timing(progress, {
+      toValue: 1,
+      duration: 260,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [visible, progress]);
 
   useEffect(() => {
     if (visible || !rendered) return;
-    Animated.parallel([
-      Animated.timing(opacity, { toValue: 0, duration: 140, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
-      Animated.timing(scale, { toValue: 0.92, duration: 160, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
-    ]).start(({ finished }) => {
+    Animated.timing(progress, {
+      toValue: 0,
+      duration: 170,
+      easing: Easing.in(Easing.cubic),
+      useNativeDriver: true,
+    }).start(({ finished }) => {
       if (finished && !visibleRef.current) setRendered(false);
     });
-  }, [visible, rendered, scale, opacity]);
+  }, [visible, rendered, progress]);
 
   if (!rendered) return null;
 
+  const backdrop = progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
+  const windowOpacity = progress.interpolate({ inputRange: [0, 0.6, 1], outputRange: [0, 1, 1] });
+  const windowScale = progress.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] });
+  const windowY = progress.interpolate({ inputRange: [0, 1], outputRange: [16, 0] });
+
   return (
     <Modal transparent visible animationType="none" statusBarTranslucent navigationBarTranslucent>
-      <TouchableWithoutFeedback onPress={onClose}>
-        <Animated.View style={{ flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.45)', alignItems: 'center', justifyContent: 'center', opacity }} />
-      </TouchableWithoutFeedback>
-      <Animated.View
-        pointerEvents="box-none"
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          alignItems: 'center',
-          justifyContent: 'center',
-          transform: [{ scale }],
-        }}>
-        <View style={{
-          backgroundColor: theme.surface,
-          borderRadius: 20,
-          width: '80%',
-          maxWidth: 300,
-          shadowColor: '#000',
-          shadowOffset: { width: 0, height: 8 },
-          shadowOpacity: 0.25,
-          shadowRadius: 20,
-          elevation: 24,
-          paddingHorizontal: 18,
-          paddingVertical: 16,
-          alignItems: 'center',
-        }}>
-          <Text style={{ fontSize: fs.small * 0.9375, fontWeight: '600', color: theme.textMuted, textAlign: 'center', marginBottom: fs.spacing * 0.875 }}>{tr('fontSize')}</Text>
-          <FontSizeSlider
-            value={fontScale}
-            onValueChange={setFontScale}
-            theme={theme}
-            fs={fs}
-          />
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginTop: fs.spacing * 0.875 }}>
-            <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted }}>{tr('smallFont')}</Text>
-            <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted }}>{tr('largeFont')}</Text>
+      <Animated.View style={StyleSheet.absoluteFill}>
+        <TouchableWithoutFeedback onPress={onClose}>
+          <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0, 0, 0, 0.45)', opacity: backdrop }]} />
+        </TouchableWithoutFeedback>
+        <Animated.View
+          pointerEvents="box-none"
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            alignItems: 'center',
+            justifyContent: 'center',
+            opacity: windowOpacity,
+            transform: [{ scale: windowScale }, { translateY: windowY }],
+          }}
+        >
+          <View style={{
+            backgroundColor: theme.surface,
+            borderRadius: 20,
+            width: '80%',
+            maxWidth: 300,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 8 },
+            shadowOpacity: 0.25,
+            shadowRadius: 20,
+            elevation: 24,
+            paddingHorizontal: 18,
+            paddingVertical: 16,
+            alignItems: 'center',
+          }}>
+            <Text style={{ fontSize: fs.small * 0.9375, fontWeight: '600', color: theme.textMuted, textAlign: 'center', marginBottom: fs.spacing * 0.875 }}>{tr('fontSize')}</Text>
+            <FontSizeSlider
+              value={fontScale}
+              onValueChange={setFontScale}
+              theme={theme}
+              fs={fs}
+            />
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginTop: fs.spacing * 0.875 }}>
+              <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted }}>{tr('smallFont')}</Text>
+              <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted }}>{tr('largeFont')}</Text>
+            </View>
           </View>
-        </View>
+        </Animated.View>
       </Animated.View>
     </Modal>
   );
@@ -958,7 +985,7 @@ export default function SettingsScreen() {
         <Text style={styles.headerTitle}>{tr('about')}</Text>
       </View>
 
-      <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
+      <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent} showsVerticalScrollIndicator={false}>
         <View style={styles.hero}>
           <View style={styles.heroIcon}>
             <Image source={APP_ICON_SOURCE} style={{ width: '100%', height: '100%' }} resizeMode="contain" />

@@ -343,6 +343,7 @@ export default function WeatherPhenomenonFinder() {
           keyExtractor={(item) => item.name + '-' + item.weathercode}
           renderItem={renderItem}
           contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
         />
       )}
       {!loading && results.length === 0 && (
