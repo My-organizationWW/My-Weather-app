@@ -1,21 +1,51 @@
-import React, { useMemo } from 'react';
-import { Modal, View, Text, TouchableOpacity, StyleSheet, TouchableWithoutFeedback } from 'react-native';
+import React, { useMemo, useEffect, useRef } from 'react';
+import { Modal, View, Text, StyleSheet, TouchableWithoutFeedback, Animated as RNAnimated } from 'react-native';
 import Animated, { LinearTransition } from 'react-native-reanimated';
+import PressableScale from './components/PressableScale';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 import { useFontSize } from './FontSizeContext';
 import { useTranslation } from 'react-i18next';
 import { getPluralSelectedText } from './utils/plural';
 
+function CardScale({ style, children, ...rest }) {
+  const opacity = useRef(new RNAnimated.Value(0)).current;
+  const scale = useRef(new RNAnimated.Value(0.94)).current;
+
+  useEffect(() => {
+    RNAnimated.parallel([
+      RNAnimated.timing(opacity, {
+        toValue: 1,
+        duration: 160,
+        useNativeDriver: true,
+      }),
+      RNAnimated.spring(scale, {
+        toValue: 1,
+        friction: 9,
+        tension: 140,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [opacity, scale]);
+
+  return (
+    // `...rest` is load-bearing: TouchableWithoutFeedback wraps this card to
+    // swallow taps meant for the dialog, and it can only do that if the
+    // responder props reach the underlying native view.
+    <RNAnimated.View {...rest} style={[style, { opacity, transform: [{ scale }] }]}>
+      {children}
+    </RNAnimated.View>
+  );
+}
+
 export default function ConfirmDeleteModal({ visible, cityName, count, onCancel, onConfirm }) {
   const { theme } = useTheme();
   const fs = useFontSize();
   const { t } = useTranslation();
+  const isMulti = count > 1;
 
   // Adaptive density: single-city dialog is minimal, multi-city gets room
   // for the prominent count line. Height transitions animate via layout.
-  const isMulti = count > 1;
-
   const styles = useMemo(() => StyleSheet.create({
     backdrop: {
       flex: 1,
@@ -98,6 +128,7 @@ export default function ConfirmDeleteModal({ visible, cityName, count, onCancel,
       <TouchableWithoutFeedback onPress={handleCancel}>
         <View style={styles.backdrop}>
           <TouchableWithoutFeedback>
+            <CardScale style={{ width: '100%', maxWidth: isMulti ? 320 : 296 }}>
             <Animated.View
               style={styles.card}
               layout={LinearTransition.duration(220)}
@@ -118,26 +149,30 @@ export default function ConfirmDeleteModal({ visible, cityName, count, onCancel,
                 </Text>
               ) : null}
               <View style={styles.buttonRow}>
-                <TouchableOpacity
+                <PressableScale
                   style={[styles.button, { backgroundColor: theme.surfaceAlt }]}
                   onPress={handleCancel}
-                  activeOpacity={0.7}
+                  scaleTo={0.96}
+                  activeOpacity={0.85}
                 >
                   <Text style={[styles.buttonText, { color: theme.textMuted }]}>
                     {t('cities.cancel')}
                   </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
+                </PressableScale>
+                <PressableScale
                   style={[styles.button, { backgroundColor: theme.danger || '#FF453A' }]}
                   onPress={handleConfirm}
-                  activeOpacity={0.7}
+                  scaleTo={0.96}
+                  activeOpacity={0.85}
+                  haptic
                 >
                   <Text style={[styles.buttonText, { color: '#FFFFFF', fontWeight: '700' }]}>
                     {t('cities.delete')}
                   </Text>
-                </TouchableOpacity>
+                </PressableScale>
               </View>
             </Animated.View>
+            </CardScale>
           </TouchableWithoutFeedback>
         </View>
       </TouchableWithoutFeedback>

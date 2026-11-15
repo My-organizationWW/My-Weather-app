@@ -3,7 +3,6 @@ import {
   View,
   Text,
   Modal,
-  TouchableOpacity,
   TouchableWithoutFeedback,
   ScrollView,
   ActivityIndicator,
@@ -11,6 +10,7 @@ import {
   Alert,
   StyleSheet,
 } from 'react-native';
+import PressableScale from './PressableScale';
 import * as FileSystem from 'expo-file-system/legacy';
 import {
   listInternalLogs,
@@ -162,16 +162,16 @@ export default function CrashLogViewer({ visible, onClose, theme, fs }) {
           {file.mtime ? ` · ${new Date(file.mtime > 1e12 ? file.mtime : file.mtime * 1000).toLocaleString()}` : ''}
         </Text>
         <View style={styles.row}>
-          <TouchableOpacity style={styles.btnGhost} onPress={() => toggleExpand(file)}>
+          <PressableScale style={styles.btnGhost} onPress={() => toggleExpand(file)} scaleTo={0.97}>
             <Text style={styles.btnGhostText}>{expandedKey === key ? 'Скрыть' : 'Показать'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.btn} onPress={() => shareLog(file)}>
+          </PressableScale>
+          <PressableScale style={styles.btn} onPress={() => shareLog(file)} scaleTo={0.97}>
             <Text style={styles.btnText}>Поделиться</Text>
-          </TouchableOpacity>
+          </PressableScale>
           {file.location === 'download' && (
-            <TouchableOpacity style={styles.btnGhost} onPress={() => deleteOneDownload(file)}>
+            <PressableScale style={styles.btnGhost} onPress={() => deleteOneDownload(file)} scaleTo={0.97}>
               <Text style={styles.btnDangerText}>Удалить</Text>
-            </TouchableOpacity>
+            </PressableScale>
           )}
         </View>
         {expandedKey === key &&
@@ -226,22 +226,22 @@ export default function CrashLogViewer({ visible, onClose, theme, fs }) {
               Внутренняя папка: {getInternalLogDir() || 'недоступна'}
             </Text>
             <View style={styles.row}>
-              <TouchableOpacity style={styles.btnGhost} onPress={runSelfTest} disabled={selfTest?.running}>
+              <PressableScale style={styles.btnGhost} onPress={runSelfTest} disabled={selfTest?.running} scaleTo={0.97}>
                 <Text style={styles.btnGhostText}>
                   {selfTest?.running ? 'Проверка…' : 'Тест записи'}
                 </Text>
-              </TouchableOpacity>
+              </PressableScale>
             </View>
           </ScrollView>
         )}
         <View style={styles.footer}>
-          <TouchableOpacity style={styles.btnGhost} onPress={onClose}>
+          <PressableScale style={styles.btnGhost} onPress={onClose} scaleTo={0.97}>
             <Text style={styles.btnGhostText}>Закрыть</Text>
-          </TouchableOpacity>
+          </PressableScale>
           {internalFiles.length > 0 && (
-            <TouchableOpacity style={styles.btnGhost} onPress={clearInternal}>
+            <PressableScale style={styles.btnGhost} onPress={clearInternal} scaleTo={0.97}>
               <Text style={styles.btnDangerText}>Очистить внутренние</Text>
-            </TouchableOpacity>
+            </PressableScale>
           )}
         </View>
       </View>

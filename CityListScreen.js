@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
-import { View, Text, TextInput, FlatList, Alert, StatusBar, RefreshControl, Pressable, TouchableOpacity, StyleSheet, Animated as RNAnimated } from 'react-native';
+import { View, Text, TextInput, FlatList, Alert, StatusBar, RefreshControl, StyleSheet, Animated as RNAnimated } from 'react-native';
 import Animated, { useSharedValue, useAnimatedStyle, useAnimatedReaction, withTiming, withSpring, FadeInUp, Easing } from 'react-native-reanimated';
 import ScreenWrapper from './ScreenWrapper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -16,6 +16,7 @@ import { fetchForecast, searchCity } from './utils/weatherProviders';
 import ConfirmDeleteModal from './ConfirmDeleteModal';
 import DraggableCityCard from './DraggableCityCard';
 import CurrentLocationCard from './CurrentLocationCard';
+import PressableScale from './components/PressableScale';
 import { getPluralSelectedText } from './utils/plural';
 
 const SAVED_CITIES_KEY = 'saved_cities_list';
@@ -1065,12 +1066,14 @@ export default function CityListScreen() {
     <ScreenWrapper contentStyle={{ paddingTop: Math.max(insets.top - 12, 0) }}>
       {/* Header */}
       <View style={[styles.header, { borderBottomColor: theme.border }]}>
-        <TouchableOpacity
+        <PressableScale
           style={[styles.backButton, { backgroundColor: theme.surfaceRaised }]}
           onPress={() => isSelectionMode ? cancelSelectionMode() : navigation.goBack()}
+          scaleTo={0.9}
+          haptic
         >
           <Ionicons name={isSelectionMode ? "close" : "arrow-back"} size={22} color={theme.text} />
-        </TouchableOpacity>
+        </PressableScale>
         <Text
           style={[styles.headerTitle, { color: theme.text }, headerTitleAnimStyle]}
           numberOfLines={1}
@@ -1081,11 +1084,11 @@ export default function CityListScreen() {
           {isSelectionMode ? getPluralSelectedText(selectedCities.size, t) : t('cities.title')}
         </Text>
         {isSelectionMode && (
-          <TouchableOpacity onPress={toggleSelectAll} style={{ paddingHorizontal: fs.spacing * 0.5 }}>
+          <PressableScale onPress={toggleSelectAll} style={{ paddingHorizontal: fs.spacing * 0.5 }} scaleTo={0.94}>
             <Text style={{ color: theme.tint || '#3a7bd5', fontSize: fs.base, fontWeight: '600' }}>
               {allSelected ? t('cities.deselect_all') : t('cities.select_all')}
             </Text>
-          </TouchableOpacity>
+          </PressableScale>
         )}
       </View>
 
@@ -1103,9 +1106,14 @@ export default function CityListScreen() {
           onSubmitEditing={handleAddCity}
           editable={!isSelectionMode}
         />
-        <TouchableOpacity style={[styles.addButton, { backgroundColor: theme.tint || '#3a7bd5' }]} onPress={handleAddCity}>
+        <PressableScale
+          style={[styles.addButton, { backgroundColor: theme.tint || '#3a7bd5' }]}
+          onPress={handleAddCity}
+          scaleTo={0.9}
+          haptic
+        >
           <Ionicons name="add" size={24} color="#FFFFFF" />
-        </TouchableOpacity>
+        </PressableScale>
       </Animated.View>
 
       {!listMounted ? (
@@ -1207,16 +1215,18 @@ export default function CityListScreen() {
         style={[styles.batchBottomBar, deleteBarAnimStyle]}
         pointerEvents={showDeleteBar ? 'box-none' : 'none'}
       >
-        <TouchableOpacity
+        <PressableScale
           style={styles.batchDeleteButton}
           onPress={handlePromptBatchDelete}
-          activeOpacity={0.8}
+          scaleTo={0.97}
+          activeOpacity={0.85}
+          haptic
         >
           <Ionicons name="trash-outline" size={20} color="#FFFFFF" />
           <Text style={styles.batchDeleteText}>
             {t('cities.delete')} ({selectedCities.size})
           </Text>
-        </TouchableOpacity>
+        </PressableScale>
       </Animated.View>
 
       <ConfirmDeleteModal

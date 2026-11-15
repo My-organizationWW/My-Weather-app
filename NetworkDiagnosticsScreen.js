@@ -9,13 +9,15 @@
 // footer offers Run-again + Copy-report. Probe logic lives in
 // utils/netprobe.js (shared next with the fallback circuit).
 
-import React, { useState, useRef, useCallback } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator, StyleSheet } from 'react-native';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
+import { View, Text, ScrollView, Animated, ActivityIndicator, StyleSheet, Easing } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useTranslation } from 'react-i18next';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import ScreenWrapper from './ScreenWrapper';
+import PressableScale from './components/PressableScale';
+import FadeSlideIn from './components/FadeSlideIn';
 import { useTheme } from './ThemeContext';
 import { useFontSize } from './FontSizeContext';
 import {
@@ -31,6 +33,92 @@ function verdictColor(verdict, theme) {
   if (verdict === 'ok') return theme.accent2;
   if (verdict === 'timeout' || verdict === 'http') return '#FF9F0A';
   return theme.danger;
+}
+
+// One probe row. The row itself rises in once on mount; the verdict text
+// gets its own short fade when the result for this endpoint arrives, so
+// rows "fill in" live instead of snapping from spinner to label.
+function ProbeRow({ ep, result, index, t, theme, fs }) {
+  const rowOpacity = useRef(new Animated.Value(0)).current;
+  const rowY = useRef(new Animated.Value(6)).current;
+  const verdictOpacity = useRef(new Animated.Value(result ? 1 : 0)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(rowOpacity, {
+        toValue: 1,
+        duration: 220,
+        delay: index * 45,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(rowY, {
+        toValue: 0,
+        duration: 260,
+        delay: index * 45,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [index, rowOpacity, rowY]);
+
+  useEffect(() => {
+    if (!result) return;
+    verdictOpacity.setValue(0);
+    Animated.timing(verdictOpacity, {
+      toValue: 1,
+      duration: 240,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  }, [result, verdictOpacity]);
+
+  const color = result ? verdictColor(result.verdict, theme) : theme.textMuted;
+  const verdictText = (r) => {
+    switch (r.verdict) {
+      case 'ok':
+        return `${t('netdiagOk')} · ${r.ms} ms`;
+      case 'timeout':
+        return t('netdiagTimeout');
+      case 'dns':
+        return t('netdiagDns');
+      case 'blocked':
+        return t('netdiagBlocked');
+      case 'http':
+        return `${t('netdiagHttp')} ${r.detail ?? ''}`.trim();
+      case 'offline':
+        return t('netdiagOffline');
+      default:
+        return '…';
+    }
+  };
+
+  return (
+    <Animated.View
+      style={[
+        styles.row,
+        {
+          borderBottomColor: theme.border,
+          opacity: rowOpacity,
+          transform: [{ translateY: rowY }],
+        },
+      ]}
+    >
+      <View style={[styles.dot, { backgroundColor: color }]} />
+      <Text style={[styles.epName, { color: theme.text, fontSize: fs.base * 0.92 }]}>
+        {t(`netdiagEp_${ep.id}`)}
+      </Text>
+      {result ? (
+        <Animated.Text
+          style={[styles.verdict, { color, fontSize: fs.base * 0.8, opacity: verdictOpacity }]}
+        >
+          {verdictText(result)}
+        </Animated.Text>
+      ) : (
+        <ActivityIndicator size="small" color={theme.accent} />
+      )}
+    </Animated.View>
+  );
 }
 
 export default function NetworkDiagnosticsScreen() {
@@ -120,12 +208,14 @@ export default function NetworkDiagnosticsScreen() {
   return (
     <ScreenWrapper>
       <View style={[styles.header, { borderBottomColor: theme.border }]}>
-        <TouchableOpacity
+        <PressableScale
           style={[styles.backButton, { backgroundColor: theme.surfaceRaised, width: fs.iconSize * 1.5, height: fs.iconSize * 1.5 }]}
           onPress={() => navigation.goBack()}
+          scaleTo={0.9}
+          haptic
         >
           <Ionicons name="arrow-back" size={22} color={theme.text} />
-        </TouchableOpacity>
+        </PressableScale>
         <Text
           style={[styles.headerTitle, { color: theme.text, fontSize: fs.large }]}
           numberOfLines={1}
@@ -143,48 +233,47 @@ export default function NetworkDiagnosticsScreen() {
           {t('netdiagProgress', { done: doneCount, total: NETPROBE_ENDPOINTS.length })}
         </Text>
 
-        {NETPROBE_ENDPOINTS.map((ep) => {
-          const r = results[ep.id];
-          const color = r ? verdictColor(r.verdict, theme) : theme.textMuted;
-          return (
-            <View key={ep.id} style={[styles.row, { borderBottomColor: theme.border }]}>
-              <View style={[styles.dot, { backgroundColor: color }]} />
-              <Text style={[styles.epName, { color: theme.text, fontSize: fs.base * 0.92 }]}>
-                {t(`netdiagEp_${ep.id}`)}
-              </Text>
-              {r ? (
-                <Text style={[styles.verdict, { color, fontSize: fs.base * 0.8 }]}>{verdictText(r)}</Text>
-              ) : (
-                <ActivityIndicator size="small" color={theme.accent} />
-              )}
-            </View>
-          );
-        })}
+        {NETPROBE_ENDPOINTS.map((ep, index) => (
+          <ProbeRow
+            key={`${runId.current}-${ep.id}`}
+            ep={ep}
+            result={results[ep.id]}
+            index={index}
+            t={t}
+            theme={theme}
+            fs={fs}
+          />
+        ))}
 
-        <Text style={[styles.summary, { color: theme.text, fontSize: fs.base * 0.92 }]}>
-          {summary ?? ' '}
-        </Text>
+        <FadeSlideIn delay={120} distance={4}>
+          <Text style={[styles.summary, { color: theme.text, fontSize: fs.base * 0.92 }]}>
+            {summary ?? ' '}
+          </Text>
+        </FadeSlideIn>
 
         <View style={styles.footer}>
           {done ? (
-            <TouchableOpacity
+            <PressableScale
               style={[styles.btnGhost, { borderColor: theme.border }]}
               onPress={copyResults}
+              scaleTo={0.97}
             >
               <Text style={[styles.btnGhostText, { color: theme.text, fontSize: fs.base * 0.9 }]}>
                 {copied ? t('netdiagCopied') : t('netdiagCopy')}
               </Text>
-            </TouchableOpacity>
+            </PressableScale>
           ) : null}
-          <TouchableOpacity
-            style={[styles.btn, { backgroundColor: theme.accent }, running ? { opacity: 0.5 } : null]}
+          <PressableScale
+            style={[styles.btn, { backgroundColor: theme.accent }]}
             onPress={startRun}
             disabled={running}
+            disabledOpacity={0.5}
+            scaleTo={0.97}
           >
             <Text style={[styles.btnText, { color: theme.onAccent, fontSize: fs.base * 0.9 }]}>
               {running ? t('netdiagRunning') : t('netdiagRun')}
             </Text>
-          </TouchableOpacity>
+          </PressableScale>
         </View>
       </ScrollView>
     </ScreenWrapper>

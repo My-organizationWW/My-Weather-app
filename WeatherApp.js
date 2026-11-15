@@ -29,6 +29,8 @@ import {
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
  import ScreenWrapper from './ScreenWrapper';
+import PressableScale from './components/PressableScale';
+import FadeSlideIn from './components/FadeSlideIn';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, G, Line, Path, RadialGradient, Rect, Stop } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -1024,6 +1026,95 @@ function formatWind(speedKmh, unit) {
   return `${v.toFixed(1)} ${i18n.t(`windLabels.${unit}`) || i18n.t('windLabels.kmh')}`;
 }
 
+// Fade+rise the hero block when the displayed city changes (or on first
+// load). Kept separate from the hourly/weekly lists: those already run
+// dozens of native icon loops and must not be re-mounted.
+function HeroReveal({ trigger, children }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(10)).current;
+
+  useEffect(() => {
+    opacity.setValue(0);
+    translateY.setValue(10);
+    const animation = Animated.parallel([
+      Animated.timing(opacity, {
+        toValue: 1,
+        duration: 260,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(translateY, {
+        toValue: 0,
+        duration: 300,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]);
+    animation.start();
+    return () => animation.stop();
+  }, [trigger, opacity, translateY]);
+
+  return (
+    <Animated.View style={{ opacity, transform: [{ translateY }] }}>
+      {children}
+    </Animated.View>
+  );
+}
+
+// Crossfades between text values (temperature, condition, day/night) so a
+// refresh or a unit change reads as a transition instead of a hard swap.
+// Positioned absolutely inside a sized box to avoid layout jumps.
+function CrossfadeValue({ style, value }) {
+  const [current, setCurrent] = useState(value);
+  const [previous, setPrevious] = useState(null);
+  const currentOpacity = useRef(new Animated.Value(1)).current;
+  const previousOpacity = useRef(new Animated.Value(0)).current;
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      setCurrent(value);
+      return;
+    }
+    if (value === current) return;
+    setPrevious(current);
+    setCurrent(value);
+    previousOpacity.setValue(1);
+    currentOpacity.setValue(0);
+    Animated.parallel([
+      Animated.timing(currentOpacity, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(previousOpacity, {
+        toValue: 0,
+        duration: 160,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      if (finished) setPrevious(null);
+    });
+  }, [value, current, currentOpacity, previousOpacity]);
+
+  return (
+    <View>
+      {previous !== null && (
+        <Animated.Text
+          style={[style, { position: 'absolute', top: 0, left: 0, right: 0, opacity: previousOpacity }]}
+          pointerEvents="none"
+        >
+          {previous}
+        </Animated.Text>
+      )}
+      <Animated.Text style={[style, { opacity: currentOpacity }]}>{current}</Animated.Text>
+    </View>
+  );
+}
+
 export default function App() {
   const { t: tr } = useTranslation();
   const { theme, setThemeMode, themeMode, loaded: themeLoaded } = useTheme();
@@ -1793,7 +1884,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
             onRequestClose={closeMenu}
           >
             <TouchableWithoutFeedback onPress={closeMenu}>
-              <View style={styles.menuBackdrop}>
+              <Animated.View style={[styles.menuBackdrop, { opacity: menuOpacity }]}>
                 <Animated.View
                   style={[
                     styles.dropdownMenu,
@@ -1805,27 +1896,29 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                     },
                   ]}
                 >
-                  <TouchableOpacity
+                  <PressableScale
                     style={styles.menuItem}
+                    scaleTo={0.98}
                     onPress={() => {
                       closeMenu();
                       navigation.navigate('CityList');
                     }}
                   >
                     <Text style={[styles.menuItemText, { color: theme.text }]} numberOfLines={1} ellipsizeMode="tail">{tr('cities.title')}</Text>
-                  </TouchableOpacity>
+                  </PressableScale>
                   <View style={[styles.menuDivider, { backgroundColor: theme.border || 'rgba(255,255,255,0.1)' }]} />
-                  <TouchableOpacity
+                  <PressableScale
                     style={styles.menuItem}
+                    scaleTo={0.98}
                     onPress={() => {
                       closeMenu();
                       openSettings();
                     }}
                   >
                     <Text style={[styles.menuItemText, { color: theme.text }]} numberOfLines={1} ellipsizeMode="tail">{tr('settings')}</Text>
-                  </TouchableOpacity>
+                  </PressableScale>
                 </Animated.View>
-              </View>
+              </Animated.View>
             </TouchableWithoutFeedback>
           </Modal>
 
@@ -1846,9 +1939,9 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
             }
           >
           <View style={styles.searchBarContainer}>
-            <TouchableOpacity onPress={search} style={styles.searchIconWrap} activeOpacity={0.7} hitSlop={6}>
+            <PressableScale onPress={search} style={styles.searchIconWrap} scaleTo={0.88} hitSlop={6}>
               <Ionicons name="search" size={20} color={theme.textMuted || '#94a3b8'} />
-            </TouchableOpacity>
+            </PressableScale>
 
             <View style={styles.inputWrap}>
               <Animated.Text
@@ -1893,38 +1986,41 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
               }}
               pointerEvents={city.length > 0 ? 'auto' : 'none'}
             >
-              <TouchableOpacity
+              <PressableScale
                 onPress={() => setCity('')}
                 style={styles.searchActionBtn}
-                activeOpacity={0.6}
+                scaleTo={0.88}
                 hitSlop={6}
               >
                 <Ionicons name="close-circle" size={18} color={theme.textMuted || 'rgba(255,255,255,0.4)'} />
-              </TouchableOpacity>
+              </PressableScale>
             </Animated.View>
 
-            <TouchableOpacity
+            <PressableScale
               onPress={detectMyLocation}
               disabled={locating}
-              style={[styles.searchActionBtn, locating && { opacity: 0.5 }]}
-              activeOpacity={0.6}
+              disabledOpacity={0.5}
+              style={styles.searchActionBtn}
+              scaleTo={0.88}
               hitSlop={6}
+              haptic
             >
               <Ionicons
                 name="locate-outline"
                 size={22}
                 color={theme.accent || '#38bdf8'}
               />
-            </TouchableOpacity>
+            </PressableScale>
 
-            <TouchableOpacity
+            <PressableScale
               onPress={toggleMenu}
               style={styles.searchActionBtn}
-              activeOpacity={0.6}
+              scaleTo={0.88}
               hitSlop={6}
+              haptic
             >
               <Ionicons name="ellipsis-vertical" size={20} color={theme.text} />
-            </TouchableOpacity>
+            </PressableScale>
           </View>
           {showBanner && (
             <View
@@ -1942,12 +2038,12 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
               >
                 {bannerMessage}
               </Text>
-              <TouchableOpacity style={styles.bannerButton} onPress={retryConnection} disabled={retrying}>
+              <PressableScale style={styles.bannerButton} onPress={retryConnection} disabled={retrying} scaleTo={0.95}>
                 <Text style={styles.bannerButtonText}>{retrying ? '…' : tr('retry')}</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.bannerClose} onPress={() => setDismissedMsg(bannerMessage)}>
+              </PressableScale>
+              <PressableScale style={styles.bannerClose} onPress={() => setDismissedMsg(bannerMessage)} scaleTo={0.85}>
                 <Text style={styles.bannerCloseText}>✕</Text>
-              </TouchableOpacity>
+              </PressableScale>
             </View>
           )}
           {/* Cache-First: spinner only when there is nothing to show yet. */}
@@ -1968,7 +2064,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
             </View>
           )}
           {weather && (
-            <View>
+            <HeroReveal trigger={`${weather.place.name}|${weather.place.latitude}|${weather.place.longitude}`}>
               <Text style={styles.cityName}>{weather.place.name}</Text>
               {isStale && weather.savedAt && (
                 <Text style={styles.staleLabel}>
@@ -2006,21 +2102,27 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                   <WeatherIcon type={currentType} isNight={currentIsNight} size={100} />
                 )}
               </View>
-              <Text style={styles.temperature}>
-                 {formatTemp(weather.data.current_weather.temperature, tempUnit)}
-              </Text>
-              <Text style={styles.condition}>
-                {conditionFor(weather.data.current_weather.weathercode)}
-              </Text>
+              <CrossfadeValue
+                style={styles.temperature}
+                value={formatTemp(weather.data.current_weather.temperature, tempUnit)}
+              />
+              <CrossfadeValue
+                style={styles.condition}
+                value={conditionFor(weather.data.current_weather.weathercode)}
+              />
               <View style={styles.detailRow}>
                 <View style={styles.detailCard}>
-                   <Text style={styles.detailValue}>{formatWind(weather.data.current_weather.windspeed, windUnit)}</Text>
+                   <CrossfadeValue
+                     style={styles.detailValue}
+                     value={formatWind(weather.data.current_weather.windspeed, windUnit)}
+                   />
                    <Text style={styles.detailLabel}>{tr('wind')}</Text>
                 </View>
                 <View style={styles.detailCard}>
-                  <Text style={styles.detailValue}>
-                     {weather.data.current_weather.is_day ? tr('day') : tr('night')}
-                  </Text>
+                  <CrossfadeValue
+                    style={styles.detailValue}
+                    value={weather.data.current_weather.is_day ? tr('day') : tr('night')}
+                  />
                    <Text style={styles.detailLabel}>{tr('timeOfDay')}</Text>
                 </View>
                </View>
@@ -2079,14 +2181,14 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                   </Text>
                 </View>
               ))}
-            </View>
+            </HeroReveal>
           )}
            {!loading && !locating && !weather && (
-             <View style={styles.center}>
+             <FadeSlideIn distance={4} style={styles.center}>
                <Text style={styles.hint}>
                  {tr('enterCityOrLocation')}
                </Text>
-             </View>
+             </FadeSlideIn>
            )}
           </ScrollView>
         </Animated.View>
@@ -2426,6 +2528,36 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
   );
 }
 
+function PermissionCard({ style, children, ...rest }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  const scale = useRef(new Animated.Value(0.92)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(opacity, {
+        toValue: 1,
+        duration: 180,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.spring(scale, {
+        toValue: 1,
+        friction: 9,
+        tension: 140,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [opacity, scale]);
+
+  return (
+    // Forward the responder props so the inner TouchableWithoutFeedback can
+    // keep card taps from falling through to the backdrop's close handler.
+    <Animated.View {...rest} style={[style, { opacity, transform: [{ scale }] }]}>
+      {children}
+    </Animated.View>
+  );
+}
+
 function PermissionModal({ visible, onClose, onOpenSettings, theme, fs }) {
   const { t: tr } = useTranslation();
   if (!visible) return null;
@@ -2434,18 +2566,18 @@ function PermissionModal({ visible, onClose, onOpenSettings, theme, fs }) {
       <TouchableWithoutFeedback onPress={onClose}>
         <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: 24 }}>
           <TouchableWithoutFeedback>
-            <View style={{ width: '100%', maxWidth: 360, backgroundColor: theme.surfaceAlt || theme.background, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: theme.border || 'rgba(255,255,255,0.1)' }}>
+            <PermissionCard style={{ width: '100%', maxWidth: 360, backgroundColor: theme.surfaceAlt || theme.background, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: theme.border || 'rgba(255,255,255,0.1)' }}>
               <Text style={{ fontSize: fs.base * 1.125, fontWeight: '600', color: theme.text, marginBottom: 8, textAlign: 'center' }}>{tr('permission_required')}</Text>
               <Text style={{ fontSize: fs.base * 0.9375, color: theme.textSecondary || theme.textMuted, marginBottom: 20, lineHeight: 20, textAlign: 'center' }}>{tr('location_permission_message')}</Text>
               <View style={{ flexDirection: 'column', gap: 10 }}>
-                <TouchableOpacity onPress={onOpenSettings} style={{ paddingVertical: 12, paddingHorizontal: 16, borderRadius: 8, backgroundColor: theme.accent, alignItems: 'center' }}>
+                <PressableScale onPress={onOpenSettings} style={{ paddingVertical: 12, paddingHorizontal: 16, borderRadius: 8, backgroundColor: theme.accent, alignItems: 'center' }} scaleTo={0.97}>
                   <Text style={{ color: theme.onAccent || '#ffffff', fontSize: fs.base * 0.9375, fontWeight: '600' }}>{tr('open_settings')}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={onClose} style={{ paddingVertical: 12, paddingHorizontal: 16, borderRadius: 8, alignItems: 'center' }}>
+                </PressableScale>
+                <PressableScale onPress={onClose} style={{ paddingVertical: 12, paddingHorizontal: 16, borderRadius: 8, alignItems: 'center' }} scaleTo={0.97}>
                   <Text style={{ color: theme.textMuted || theme.textSecondary, fontSize: fs.base * 0.9375, fontWeight: '500' }}>{tr('cancel')}</Text>
-                </TouchableOpacity>
+                </PressableScale>
               </View>
-            </View>
+            </PermissionCard>
           </TouchableWithoutFeedback>
         </View>
       </TouchableWithoutFeedback>

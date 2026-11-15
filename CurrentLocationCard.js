@@ -1,9 +1,10 @@
 import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, Pressable } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Defs, RadialGradient, Stop, Rect } from 'react-native-svg';
 import { getWeatherTheme } from './DraggableCityCard';
+import PressableScale from './components/PressableScale';
 
 // Top card for the device's geolocation. Rendered ONLY when coordinates were
 // successfully resolved (location !== null). Deliberately NOT a DraggableCityCard:
@@ -108,8 +109,13 @@ export default function CurrentLocationCard({ item, theme, fs, t, onPress, style
   }), [theme, fs]);
 
   return (
-    <View style={[styles.cardContainer, style]}>
-      <Pressable onPress={onPress} disabled={!onPress}>
+    <PressableScale
+      style={[styles.cardContainer, style]}
+      onPress={onPress}
+      disabled={!onPress}
+      scaleTo={0.985}
+      activeOpacity={0.92}
+    >
         <View style={styles.cardBackground}>
           <LinearGradient
             colors={weatherTheme.colors}
@@ -169,7 +175,6 @@ export default function CurrentLocationCard({ item, theme, fs, t, onPress, style
             </View>
           </View>
         </View>
-      </Pressable>
-    </View>
+    </PressableScale>
   );
 }

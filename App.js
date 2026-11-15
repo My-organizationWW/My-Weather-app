@@ -2,7 +2,7 @@ import React, { createContext, useState, useEffect, useRef } from 'react';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { Text, View, TouchableOpacity, Animated, StatusBar, StyleSheet } from 'react-native';
+import { View, Animated, Easing, StatusBar, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { enableFreeze } from 'react-native-screens';
@@ -24,6 +24,7 @@ import { ThemeProvider, useTheme } from './ThemeContext';
 import { LoadingContext } from './LoadingContext';
 import { initI18n } from './i18n';
 import GlobalErrorBoundary from './components/GlobalErrorBoundary';
+import PressableScale from './components/PressableScale';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -108,6 +109,8 @@ function TabScreens() {
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
+        // Cross-fade the two tabs instead of swapping them instantly.
+        animation: 'fade',
          tabBarStyle: {
           height: 50,
           paddingBottom: 0,
@@ -127,6 +130,10 @@ function AnimatedTabBar({ state, descriptors, navigation, style }) {
   const { t } = useTranslation();
   const { base, iconSize } = useFontSize();
   const animationValues = useRef(state.routes.map(() => new Animated.Value(1))).current;
+  // Focus cross-fade per tab (0 = muted, 1 = accent), for the label colour.
+  const focusValues = useRef(state.routes.map((route) => new Animated.Value(
+    route.name === state.routes[state.index].name ? 1 : 0
+  ))).current;
 
   const focusedOptions = descriptors[state.routes[state.index].key]?.options ?? {};
   const displayStyle = StyleSheet.flatten(focusedOptions?.tabBarStyle ?? {})?.display ?? 'flex';
@@ -134,8 +141,15 @@ function AnimatedTabBar({ state, descriptors, navigation, style }) {
   useEffect(() => {
     state.routes.forEach((route, index) => {
       Animated.spring(animationValues[index], {
-        toValue: index === state.index ? 1.15 : 1,
-        friction: 3,
+        toValue: index === state.index ? 1.12 : 1,
+        friction: 6,
+        tension: 140,
+        useNativeDriver: true,
+      }).start();
+      Animated.timing(focusValues[index], {
+        toValue: index === state.index ? 1 : 0,
+        duration: 180,
+        easing: Easing.out(Easing.quad),
         useNativeDriver: true,
       }).start();
     });
@@ -172,26 +186,54 @@ function AnimatedTabBar({ state, descriptors, navigation, style }) {
         };
 
         return (
-          <TouchableOpacity
+          <PressableScale
             key={route.key}
             style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}
             onPress={onPress}
-            activeOpacity={0.7}
+            scaleTo={0.94}
+            activeOpacity={0.9}
+            haptic
           >
-            <Animated.View style={{ transform: [{ scale: animationValues[index] }] }}>
-              <IconComponent color={iconColor} size={iconSize * 0.8} />
-            </Animated.View>
-            <Text
+            <View style={{ alignItems: 'center', justifyContent: 'center' }}>
+              <Animated.View
+                style={{
+                  position: 'absolute',
+                  width: iconSize * 1.45,
+                  height: iconSize * 0.95,
+                  borderRadius: iconSize * 0.5,
+                  backgroundColor: theme.accent + '1F',
+                  opacity: animationValues[index].interpolate({
+                    inputRange: [1, 1.12],
+                    outputRange: [0, 1],
+                  }),
+                  transform: [
+                    {
+                      scale: animationValues[index].interpolate({
+                        inputRange: [1, 1.12],
+                        outputRange: [0.7, 1],
+                      }),
+                    },
+                  ],
+                }}
+              />
+              <Animated.View style={{ transform: [{ scale: animationValues[index] }] }}>
+                <IconComponent color={iconColor} size={iconSize * 0.8} />
+              </Animated.View>
+            </View>
+            <Animated.Text
               style={{
                 fontSize: base * 0.6875,
                 fontWeight: '600',
-                color: iconColor,
                 marginTop: 0,
+                color: focusValues[index].interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [theme.textMuted, theme.accent],
+                }),
               }}
             >
               {label}
-            </Text>
-          </TouchableOpacity>
+            </Animated.Text>
+          </PressableScale>
         );
       })}
     </View>

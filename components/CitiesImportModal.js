@@ -15,7 +15,6 @@ import {
   View,
   Text,
   Modal,
-  TouchableOpacity,
   TouchableWithoutFeedback,
   ScrollView,
   ActivityIndicator,
@@ -23,6 +22,7 @@ import {
   Dimensions,
   StyleSheet,
 } from 'react-native';
+import PressableScale from './PressableScale';
 
 // Definite overlay height. The modal content host on some MIUI builds
 // measures children wrap-content: top:0+bottom:0 of an EMPTY absolutely
@@ -413,28 +413,29 @@ export default function CitiesImportModal({ visible, onClose, theme, fs, onImpor
         <View style={styles.handle} />
         <View style={styles.titleRow}>
           <Text style={[styles.title, { flex: 1, marginBottom: 0 }]}>{t('backupFilesTitle')}</Text>
-          <TouchableOpacity onPress={onClose} hitSlop={14} activeOpacity={0.6}>
+          <PressableScale onPress={onClose} hitSlop={14} scaleTo={0.85}>
             <Ionicons name="close" size={26} color={theme.textSecondary} />
-          </TouchableOpacity>
+          </PressableScale>
         </View>
       </View>
     ) : (
       <View style={styles.titleRow}>
         <Text style={[styles.title, { flex: 1, marginBottom: 0 }]}>{t('backupFilesTitle')}</Text>
-        <TouchableOpacity onPress={onClose} hitSlop={14} activeOpacity={0.6}>
+        <PressableScale onPress={onClose} hitSlop={14} scaleTo={0.85}>
           <Ionicons name="close" size={26} color={theme.textSecondary} />
-        </TouchableOpacity>
+        </PressableScale>
       </View>
     );
 
   const body = (
     <>
       {titleBlock}
-      <TouchableOpacity
+      <PressableScale
         style={[styles.btnPrimary, working && styles.btnDisabled]}
         onPress={handleExportNow}
         disabled={working}
-        activeOpacity={0.7}
+        disabledOpacity={0.6}
+        scaleTo={0.97}
       >
         {working ? (
           <ActivityIndicator size="small" color={theme.onAccent} />
@@ -442,7 +443,7 @@ export default function CitiesImportModal({ visible, onClose, theme, fs, onImpor
           <Ionicons name="download-outline" size={20} color={theme.onAccent} style={{ marginRight: 8 }} />
         )}
         <Text style={styles.btnPrimaryText}>{t('backupExportNow')}</Text>
-      </TouchableOpacity>
+      </PressableScale>
       <Text style={styles.sectionTitle}>{t('backupSavedTitle')}</Text>
       {loading ? (
         <ActivityIndicator size="large" color={theme.accent} style={{ marginVertical: 24 }} />
@@ -451,20 +452,20 @@ export default function CitiesImportModal({ visible, onClose, theme, fs, onImpor
       ) : (
         <ScrollView>
           {files.map((f, i) => (
-            <TouchableOpacity
+            <PressableScale
               key={f.path}
               style={[styles.row, i === files.length - 1 && { borderBottomWidth: 0 }]}
               onPress={() => confirmImport(f.path)}
-              activeOpacity={0.6}
+              scaleTo={0.98}
             >
               <Ionicons name="document-text-outline" size={22} color={theme.textSecondary} style={{ marginRight: 12 }} />
               <Text style={styles.fileName} numberOfLines={1} ellipsizeMode="middle">
                 {f.name}
               </Text>
-              <TouchableOpacity onPress={() => confirmDeleteFile(f)} hitSlop={10} style={{ padding: 8 }} activeOpacity={0.6}>
+              <PressableScale onPress={() => confirmDeleteFile(f)} hitSlop={10} style={{ padding: 8 }} scaleTo={0.85}>
                 <Ionicons name="trash-outline" size={20} color={theme.danger} />
-              </TouchableOpacity>
-            </TouchableOpacity>
+              </PressableScale>
+            </PressableScale>
           ))}
         </ScrollView>
       )}
