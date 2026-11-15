@@ -2307,10 +2307,10 @@ expo-localization@~58.0.5:
   dependencies:
     rtl-detect "^1.0.2"
 
-expo-location@~58.0.21:
-  version "58.0.21"
-  resolved "https://registry.npmjs.org/expo-location/-/expo-location-58.0.21.tgz#a55f5213b690b2bbddaf210ee1e54d8ece73f8a5"
-  integrity sha512-9+tFlPO+brWFjCJqP2IlaaI3Y5egSo0yqAfLM94EIgSUfixtI3t4hNC3AtmuzySHuNpzSpiLAhDWXAF6yccMVg==
+expo-location@~58.0.22:
+  version "58.0.22"
+  resolved "https://registry.npmjs.org/expo-location/-/expo-location-58.0.22.tgz#4f1353bcce58bfbfa178c51cc67a92ef52750ee6"
+  integrity sha512-riZCEjY9//enExdweKSMNvjGS2AGCNG7Z8NJa+3GP5In+ZtrPdkbnhPo3JHwhWZE0NE72yv2t+AKPWauen3fkA==
   dependencies:
     "@expo/image-utils" "^0.12.7"
 
@@ -2384,10 +2384,10 @@ expo-system-ui@~58.0.7:
     "@react-native/normalize-colors" "0.88.1"
     debug "^4.3.2"
 
-expo@~58.0.24:
-  version "58.0.24"
-  resolved "https://registry.npmjs.org/expo/-/expo-58.0.24.tgz#8e08ae8030ab09ccb1a2942b2fc62c8db7c8c31a"
-  integrity sha512-EPgijeqjnK+eaoA9VzJvvodmKBxEcfNlRBxyZr5s1dmvjgF13p3HfEr6eRjsTtnXdz/GlKn2uffTM1uHZeaSVQ==
+expo@~58.0.25:
+  version "58.0.25"
+  resolved "https://registry.npmjs.org/expo/-/expo-58.0.25.tgz#617a7c19c307d3e82993176f399fe5db43612a44"
+  integrity sha512-Ih7pQYPS+2ZFS5APNtgOUp2AK/M+zfILK9Z5/wh6PoLn6XF3dh+nlcvugotytVzf8jX5/NBMcB7xJT+97oaNvw==
   dependencies:
     "@babel/runtime" "^7.20.0"
     "@expo/cli" "^58.1.20"
