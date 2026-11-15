@@ -346,15 +346,17 @@ export default function WeatherPhenomenonFinder() {
         />
       )}
       {!loading && results.length === 0 && (
-        <View style={styles.hintContainer}>
-          <Text style={styles.hint}>
-            {searchError === 'offline'
-              ? t('noInternet')
-              : hasSearched
-                ? t('noResultsAfterSearch')
-                : t('noResultsBeforeSearch')}
-          </Text>
-        </View>
+          <View style={styles.hintContainer}>
+            <FadeSlideIn distance={4}>
+              <Text style={styles.hint}>
+                {searchError === 'offline'
+                  ? t('noInternet')
+                  : hasSearched
+                    ? t('noResultsAfterSearch')
+                    : t('noResultsBeforeSearch')}
+              </Text>
+            </FadeSlideIn>
+          </View>
       )}
     </SafeAreaView>
   );

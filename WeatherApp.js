@@ -30,6 +30,7 @@ import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
  import ScreenWrapper from './ScreenWrapper';
 import PressableScale from './components/PressableScale';
+import FadeSlideIn from './components/FadeSlideIn';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Defs, G, Line, Path, RadialGradient, Rect, Stop } from 'react-native-svg';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -2183,11 +2184,11 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
             </HeroReveal>
           )}
            {!loading && !locating && !weather && (
-             <View style={styles.center}>
+             <FadeSlideIn distance={4} style={styles.center}>
                <Text style={styles.hint}>
                  {tr('enterCityOrLocation')}
                </Text>
-             </View>
+             </FadeSlideIn>
            )}
           </ScrollView>
         </Animated.View>
