@@ -2036,7 +2036,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                       if (item.type === 'sunrise' || item.type === 'sunset') {
                         const isSunrise = item.type === 'sunrise';
                         return (
-                          <View key={item.time} style={styles.hourlyCard}>
+                          <View key={`${item.type}-${item.time}`} style={styles.hourlyCard}>
                             <Text style={styles.hourlyTemp} numberOfLines={1}>
                               {tr(isSunrise ? 'sunrise' : 'sunset')}
                             </Text>
@@ -2046,7 +2046,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                         );
                       }
                       return (
-                        <View key={item.time} style={styles.hourlyCard}>
+                        <View key={`${item.type}-${item.time}`} style={styles.hourlyCard}>
                           <Text style={styles.hourlyTemp} numberOfLines={1}>
                             {item.temp === null || item.temp === undefined ? '–' : formatTemp(item.temp, tempUnit)}
                           </Text>
