@@ -292,46 +292,120 @@ function BottomSheet({ visible, onClose, title, options, selectedValue, onSelect
   );
 }
 
-function CenteredModal({ visible, onClose, title, options, selectedValue, onSelect, tr, theme, fs }) {
-  const progress = useRef(new Animated.Value(0)).current;
+// Shared motion for the centered dialogs in Settings.
+//
+// The shell and the backdrop run on separate clocks: the dim fades in a
+// touch faster and leaves a touch slower than the card, so the card never
+// pops against a still-dark background. The card settles on a short spring
+// (a hair of overshoot, not a bounce), while its content follows with a
+// small top-down cascade. Everything stays on the native driver.
+function useCenteredDialogMotion(visible) {
   const [rendered, setRendered] = useState(visible);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
 
-  // Symmetric in/out: backdrop dims while the window fades in, rises from
-  // 0.9 and lifts 16px; the close plays the exact reverse. Using one
-  // progress value keeps both halves identical instead of two hand-tuned
-  // keyframe sets that drift apart.
+  const backdrop = useRef(new Animated.Value(0)).current;
+  const windowOpacity = useRef(new Animated.Value(0)).current;
+  const windowScale = useRef(new Animated.Value(0.93)).current;
+  const windowY = useRef(new Animated.Value(16)).current;
+  const content = useRef(new Animated.Value(0)).current;
+
   useEffect(() => {
     if (!visible) return;
     setRendered(true);
-    progress.setValue(0);
-    Animated.timing(progress, {
-      toValue: 1,
-      duration: 260,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [visible, progress]);
+    backdrop.setValue(0);
+    windowOpacity.setValue(0);
+    windowScale.setValue(0.93);
+    windowY.setValue(16);
+    content.setValue(0);
+    Animated.parallel([
+      Animated.timing(backdrop, {
+        toValue: 1,
+        duration: 220,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(windowOpacity, {
+        toValue: 1,
+        duration: 170,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.spring(windowScale, {
+        toValue: 1,
+        friction: 14,
+        tension: 180,
+        useNativeDriver: true,
+      }),
+      Animated.timing(windowY, {
+        toValue: 0,
+        duration: 280,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(content, {
+        toValue: 1,
+        duration: 260,
+        delay: 40,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [visible, backdrop, windowOpacity, windowScale, windowY, content]);
 
   useEffect(() => {
     if (visible || !rendered) return;
-    Animated.timing(progress, {
-      toValue: 0,
-      duration: 170,
-      easing: Easing.in(Easing.cubic),
-      useNativeDriver: true,
-    }).start(({ finished }) => {
+    // The card leaves faster than it arrived and never waits for the
+    // content cascade: a crisp close, then the backdrop clears last.
+    Animated.parallel([
+      Animated.timing(backdrop, {
+        toValue: 0,
+        duration: 190,
+        easing: Easing.in(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(windowOpacity, {
+        toValue: 0,
+        duration: 130,
+        easing: Easing.in(Easing.quad),
+        useNativeDriver: true,
+      }),
+      Animated.timing(windowScale, {
+        toValue: 0.95,
+        duration: 170,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(windowY, {
+        toValue: 10,
+        duration: 170,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
       if (finished && !visibleRef.current) setRendered(false);
     });
-  }, [visible, rendered, progress]);
+  }, [visible, rendered, backdrop, windowOpacity, windowScale, windowY]);
+
+  return { rendered, backdrop, windowOpacity, windowScale, windowY, content };
+}
+
+function CenteredModal({ visible, onClose, title, options, selectedValue, onSelect, tr, theme, fs }) {
+  const { rendered, backdrop, windowOpacity, windowScale, windowY, content } =
+    useCenteredDialogMotion(visible);
 
   if (!rendered) return null;
 
-  const backdrop = progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
-  const windowOpacity = progress.interpolate({ inputRange: [0, 0.6, 1], outputRange: [0, 1, 1] });
-  const windowScale = progress.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] });
-  const windowY = progress.interpolate({ inputRange: [0, 1], outputRange: [16, 0] });
+  const titleOpacity = content.interpolate({
+    inputRange: [0.05, 0.45],
+    outputRange: [0, 1],
+    extrapolate: 'clamp',
+  });
+  const titleY = content.interpolate({
+    inputRange: [0.05, 0.45],
+    outputRange: [4, 0],
+    extrapolate: 'clamp',
+  });
 
   return (
     <Modal transparent visible animationType="none" statusBarTranslucent navigationBarTranslucent>
@@ -349,11 +423,9 @@ function CenteredModal({ visible, onClose, title, options, selectedValue, onSele
             bottom: 0,
             alignItems: 'center',
             justifyContent: 'center',
-            opacity: windowOpacity,
-            transform: [{ scale: windowScale }, { translateY: windowY }],
           }}
         >
-          <View style={{
+          <Animated.View style={{
             backgroundColor: theme.surface,
             borderRadius: 20,
             width: '80%',
@@ -365,29 +437,60 @@ function CenteredModal({ visible, onClose, title, options, selectedValue, onSele
             elevation: 24,
             paddingHorizontal: 18,
             paddingVertical: 16,
+            opacity: windowOpacity,
+            transform: [{ scale: windowScale }, { translateY: windowY }],
           }}>
-            <Text style={{ fontSize: fs.small * 0.9375, fontWeight: '600', color: theme.textMuted, textAlign: 'center', marginBottom: fs.spacing * 0.875 }}>{title}</Text>
-            {options.map((opt) => (
-              <PressableScale
-                key={opt.value}
-                style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: fs.spacing * 0.6875 }}
-                onPress={() => { onSelect(opt.value); onClose(); }}
-                scaleTo={0.98}
-              >
-                <View style={selectedValue === opt.value ? {
-                  width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: theme.accent, alignItems: 'center', justifyContent: 'center', marginRight: 12,
-                } : {
-                  width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: theme.border, alignItems: 'center', justifyContent: 'center', marginRight: 12,
-                }}>
-                  {selectedValue === opt.value && <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: theme.accent }} />}
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontSize: fs.base * 0.9375, fontWeight: '600', color: theme.text }}>{tr(opt.labelKey)}</Text>
-                  {opt.descKey ? <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted, marginTop: fs.spacing * 0.125 }}>{tr(opt.descKey)}</Text> : null}
-                </View>
-              </PressableScale>
-            ))}
-          </View>
+            <Animated.Text style={{
+              fontSize: fs.small * 0.9375,
+              fontWeight: '600',
+              color: theme.textMuted,
+              textAlign: 'center',
+              marginBottom: fs.spacing * 0.875,
+              opacity: titleOpacity,
+              transform: [{ translateY: titleY }],
+            }}>{title}</Animated.Text>
+            {options.map((opt, index) => {
+              // Short top-down cascade. The last rows start a few frames
+              // later, so a five-item list reads as one motion, not five
+              // independent fades. On close the card fades as a whole.
+              const start = 0.12 + Math.min(index, 5) * 0.07;
+              const end = Math.min(start + 0.55, 1);
+              const rowOpacity = content.interpolate({
+                inputRange: [start, end],
+                outputRange: [0, 1],
+                extrapolate: 'clamp',
+              });
+              const rowY = content.interpolate({
+                inputRange: [start, end],
+                outputRange: [7, 0],
+                extrapolate: 'clamp',
+              });
+              return (
+                <Animated.View
+                  key={opt.value}
+                  style={{ opacity: rowOpacity, transform: [{ translateY: rowY }] }}
+                >
+                  <PressableScale
+                    style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: fs.spacing * 0.6875 }}
+                    onPress={() => { onSelect(opt.value); onClose(); }}
+                    scaleTo={0.98}
+                  >
+                    <View style={selectedValue === opt.value ? {
+                      width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: theme.accent, alignItems: 'center', justifyContent: 'center', marginRight: 12,
+                    } : {
+                      width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: theme.border, alignItems: 'center', justifyContent: 'center', marginRight: 12,
+                    }}>
+                      {selectedValue === opt.value && <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: theme.accent }} />}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: fs.base * 0.9375, fontWeight: '600', color: theme.text }}>{tr(opt.labelKey)}</Text>
+                      {opt.descKey ? <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted, marginTop: fs.spacing * 0.125 }}>{tr(opt.descKey)}</Text> : null}
+                    </View>
+                  </PressableScale>
+                </Animated.View>
+              );
+            })}
+          </Animated.View>
         </Animated.View>
       </Animated.View>
     </Modal>
@@ -550,43 +653,16 @@ function FontSizeSlider({ value, onValueChange, theme, fs }) {
 }
 
 function FontSizeModal({ visible, onClose, fontScale, setFontScale, tr, theme, fs }) {
-  const progress = useRef(new Animated.Value(0)).current;
-  const [rendered, setRendered] = useState(visible);
-  const visibleRef = useRef(visible);
-  visibleRef.current = visible;
-
-  // Same symmetric motion as the option pickers, so every centered dialog
-  // in Settings opens and closes the same way.
-  useEffect(() => {
-    if (!visible) return;
-    setRendered(true);
-    progress.setValue(0);
-    Animated.timing(progress, {
-      toValue: 1,
-      duration: 260,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [visible, progress]);
-
-  useEffect(() => {
-    if (visible || !rendered) return;
-    Animated.timing(progress, {
-      toValue: 0,
-      duration: 170,
-      easing: Easing.in(Easing.cubic),
-      useNativeDriver: true,
-    }).start(({ finished }) => {
-      if (finished && !visibleRef.current) setRendered(false);
-    });
-  }, [visible, rendered, progress]);
+  const { rendered, backdrop, windowOpacity, windowScale, windowY, content } =
+    useCenteredDialogMotion(visible);
 
   if (!rendered) return null;
 
-  const backdrop = progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
-  const windowOpacity = progress.interpolate({ inputRange: [0, 0.6, 1], outputRange: [0, 1, 1] });
-  const windowScale = progress.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] });
-  const windowY = progress.interpolate({ inputRange: [0, 1], outputRange: [16, 0] });
+  const contentY = content.interpolate({
+    inputRange: [0, 1],
+    outputRange: [6, 0],
+    extrapolate: 'clamp',
+  });
 
   return (
     <Modal transparent visible animationType="none" statusBarTranslucent navigationBarTranslucent>
@@ -604,11 +680,9 @@ function FontSizeModal({ visible, onClose, fontScale, setFontScale, tr, theme, f
             bottom: 0,
             alignItems: 'center',
             justifyContent: 'center',
-            opacity: windowOpacity,
-            transform: [{ scale: windowScale }, { translateY: windowY }],
           }}
         >
-          <View style={{
+          <Animated.View style={{
             backgroundColor: theme.surface,
             borderRadius: 20,
             width: '80%',
@@ -621,19 +695,28 @@ function FontSizeModal({ visible, onClose, fontScale, setFontScale, tr, theme, f
             paddingHorizontal: 18,
             paddingVertical: 16,
             alignItems: 'center',
+            opacity: windowOpacity,
+            transform: [{ scale: windowScale }, { translateY: windowY }],
           }}>
-            <Text style={{ fontSize: fs.small * 0.9375, fontWeight: '600', color: theme.textMuted, textAlign: 'center', marginBottom: fs.spacing * 0.875 }}>{tr('fontSize')}</Text>
-            <FontSizeSlider
-              value={fontScale}
-              onValueChange={setFontScale}
-              theme={theme}
-              fs={fs}
-            />
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginTop: fs.spacing * 0.875 }}>
-              <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted }}>{tr('smallFont')}</Text>
-              <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted }}>{tr('largeFont')}</Text>
-            </View>
-          </View>
+            <Animated.View style={{
+              width: '100%',
+              alignItems: 'center',
+              opacity: content,
+              transform: [{ translateY: contentY }],
+            }}>
+              <Text style={{ fontSize: fs.small * 0.9375, fontWeight: '600', color: theme.textMuted, textAlign: 'center', marginBottom: fs.spacing * 0.875 }}>{tr('fontSize')}</Text>
+              <FontSizeSlider
+                value={fontScale}
+                onValueChange={setFontScale}
+                theme={theme}
+                fs={fs}
+              />
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginTop: fs.spacing * 0.875 }}>
+                <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted }}>{tr('smallFont')}</Text>
+                <Text style={{ fontSize: fs.small * 0.769, color: theme.textMuted }}>{tr('largeFont')}</Text>
+              </View>
+            </Animated.View>
+          </Animated.View>
         </Animated.View>
       </Animated.View>
     </Modal>
