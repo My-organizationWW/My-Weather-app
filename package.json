@@ -1,6 +1,6 @@
 {
   "name": "my-app-final",
-  "version": "1.0.26-test",
+  "version": "1.0.27-test",
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
     "start": "expo start",
