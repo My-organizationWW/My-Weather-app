@@ -25,6 +25,9 @@ jobs:
       - name: Install dependencies
         run: yarn install
 
+      - name: Unit tests
+        run: yarn test
+
       - name: Check Expo SDK health (advisory)
         # expo-doctor compares against the live SDK patch matrix, so it starts
         # failing the moment Expo publishes a newer patch (58.0.24 at the time
