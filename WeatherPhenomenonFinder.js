@@ -1,60 +1,54 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { View, Text, FlatList, ActivityIndicator, StyleSheet, Animated, Easing } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { useTranslation } from 'react-i18next';
 import Svg, { Circle, Path } from 'react-native-svg';
+import { Ionicons } from '@expo/vector-icons';
 import { useFontSize } from './FontSizeContext';
 import { useTheme } from './ThemeContext';
+import { useSettings } from './SettingsContext';
 import { fetchForecast } from './utils/weatherProviders';
+import { fetchJsonWithRetry, isExternalAbortError } from './utils/http';
+import { formatTemp, weathercodeToType } from './utils/weatherFormat';
+import { WeatherIcon } from './components/weather/WeatherIcons';
 import PressableScale from './components/PressableScale';
 import FadeSlideIn from './components/FadeSlideIn';
 
-// Throwing fetch with a 10s cap for the provider layer (plain fetch would
-// hang for OS-level minutes on blackholed routes — the old endless
-// "polling 20 cities" spinner).
-async function phFetch(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    return await res.json();
-  } finally {
-    clearTimeout(timer);
-  }
-}
+const POLL_CONCURRENCY = 6;
+const SNAPSHOT_TTL_MS = 3 * 60 * 1000;
 
 const CITIES = [
-  { name: 'Москва', latitude: 55.7558, longitude: 37.6173 },
-  { name: 'Лондон', latitude: 51.5074, longitude: -0.1278 },
-  { name: 'Нью-Йорк', latitude: 40.7128, longitude: -74.006 },
-  { name: 'Токио', latitude: 35.6762, longitude: 139.6503 },
-  { name: 'Сочи', latitude: 43.5974, longitude: 39.7154 },
-  { name: 'Мумбаи', latitude: 19.076, longitude: 72.8777 },
-  { name: 'Пекин', latitude: 39.9042, longitude: 116.4074 },
-  { name: 'Санкт-Петербург', latitude: 59.9343, longitude: 30.3351 },
-  { name: 'Новосибирск', latitude: 55.0302, longitude: 82.9784 },
-  { name: 'Екатеринбург', latitude: 56.8389, longitude: 60.6159 },
-  { name: 'Норильск', latitude: 69.35, longitude: 88.2 },
-  { name: 'Мурманск', latitude: 68.97, longitude: 33.08 },
-  { name: 'Рейкьявик', latitude: 64.15, longitude: -21.94 },
-  { name: 'Красноярск', latitude: 56.0153, longitude: 92.8567 },
-  { name: 'Сеул', latitude: 37.5665, longitude: 126.978 },
-  { name: 'Берлин', latitude: 52.52, longitude: 13.405 },
-  { name: 'Париж', latitude: 48.8566, longitude: 2.3522 },
-  { name: 'Майами', latitude: 25.7617, longitude: -80.1918 },
-  { name: 'Лос-Анджелес', latitude: 34.0522, longitude: -118.2437 },
-  { name: 'Дубай', latitude: 25.2048, longitude: 55.2708 },
-  { name: 'Сингапур', latitude: 1.3521, longitude: 103.8198 },
-  { name: 'Сидней', latitude: -33.8688, longitude: 151.2093 },
-  { name: 'Якутск', latitude: 62.0355, longitude: 129.6755 },
-  { name: 'Рованиеми', latitude: 66.5039, longitude: 25.7294 },
-  { name: 'Эдмонтон', latitude: 53.5461, longitude: -113.4938 },
-  { name: 'Саппоро', latitude: 43.0642, longitude: 141.3469 },
-  { name: 'Чунцин', latitude: 29.563, longitude: 106.5516 },
+  { ru: 'Москва', en: 'Moscow', latitude: 55.7558, longitude: 37.6173 },
+  { ru: 'Лондон', en: 'London', latitude: 51.5074, longitude: -0.1278 },
+  { ru: 'Нью-Йорк', en: 'New York', latitude: 40.7128, longitude: -74.006 },
+  { ru: 'Токио', en: 'Tokyo', latitude: 35.6762, longitude: 139.6503 },
+  { ru: 'Сочи', en: 'Sochi', latitude: 43.5974, longitude: 39.7154 },
+  { ru: 'Мумбаи', en: 'Mumbai', latitude: 19.076, longitude: 72.8777 },
+  { ru: 'Пекин', en: 'Beijing', latitude: 39.9042, longitude: 116.4074 },
+  { ru: 'Санкт-Петербург', en: 'Saint Petersburg', latitude: 59.9343, longitude: 30.3351 },
+  { ru: 'Новосибирск', en: 'Novosibirsk', latitude: 55.0302, longitude: 82.9784 },
+  { ru: 'Екатеринбург', en: 'Yekaterinburg', latitude: 56.8389, longitude: 60.6159 },
+  { ru: 'Норильск', en: 'Norilsk', latitude: 69.35, longitude: 88.2 },
+  { ru: 'Мурманск', en: 'Murmansk', latitude: 68.97, longitude: 33.08 },
+  { ru: 'Рейкьявик', en: 'Reykjavik', latitude: 64.15, longitude: -21.94 },
+  { ru: 'Красноярск', en: 'Krasnoyarsk', latitude: 56.0153, longitude: 92.8567 },
+  { ru: 'Сеул', en: 'Seoul', latitude: 37.5665, longitude: 126.978 },
+  { ru: 'Берлин', en: 'Berlin', latitude: 52.52, longitude: 13.405 },
+  { ru: 'Париж', en: 'Paris', latitude: 48.8566, longitude: 2.3522 },
+  { ru: 'Майами', en: 'Miami', latitude: 25.7617, longitude: -80.1918 },
+  { ru: 'Лос-Анджелес', en: 'Los Angeles', latitude: 34.0522, longitude: -118.2437 },
+  { ru: 'Дубай', en: 'Dubai', latitude: 25.2048, longitude: 55.2708 },
+  { ru: 'Сингапур', en: 'Singapore', latitude: 1.3521, longitude: 103.8198 },
+  { ru: 'Сидней', en: 'Sydney', latitude: -33.8688, longitude: 151.2093 },
+  { ru: 'Якутск', en: 'Yakutsk', latitude: 62.0355, longitude: 129.6755 },
+  { ru: 'Рованиеми', en: 'Rovaniemi', latitude: 66.5039, longitude: 25.7294 },
+  { ru: 'Эдмонтон', en: 'Edmonton', latitude: 53.5461, longitude: -113.4938 },
+  { ru: 'Саппоро', en: 'Sapporo', latitude: 43.0642, longitude: 141.3469 },
+  { ru: 'Чунцин', en: 'Chongqing', latitude: 29.563, longitude: 106.5516 },
 ];
 
-const PHENOMENA_KEYS = ['clear', 'rain', 'snow', 'cloudy', 'fog'];
+const PHENOMENA_KEYS = ['clear', 'rain', 'snow', 'cloudy', 'fog', 'thunder'];
 
 const PHENOMENON_WMO_MAP = {
   clear: [0],
@@ -68,6 +62,36 @@ const PHENOMENON_WMO_MAP = {
 function isCodeInPhenomenon(code, phenomenon) {
   const codes = PHENOMENON_WMO_MAP[phenomenon];
   return codes ? codes.includes(code) : false;
+}
+
+function cityDisplayName(city, lang) {
+  return lang === 'en' ? city.en : city.ru;
+}
+
+function formatSnapTime(ts, lang) {
+  try {
+    return new Date(ts).toLocaleTimeString(lang === 'en' ? 'en-US' : 'ru-RU', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return '';
+  }
+}
+
+async function mapWithConcurrency(items, limit, worker, signal) {
+  const out = new Array(items.length);
+  let cursor = 0;
+  const runWorker = async () => {
+    while (cursor < items.length) {
+      if (signal?.aborted) return;
+      const idx = cursor++;
+      out[idx] = await worker(items[idx], idx);
+    }
+  };
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => runWorker());
+  await Promise.all(workers);
+  return out;
 }
 
 function SunTabIcon({ color = '#fbbf24', size = 26 }) {
@@ -88,7 +112,7 @@ function SearchTabIcon({ color = '#fbbf24', size = 26 }) {
   );
 }
 
-function PhenomenonChip({ label, active, onPress, theme, styles }) {
+const PhenomenonChip = React.memo(function PhenomenonChip({ label, active, onPress, theme, styles }) {
   const progress = useRef(new Animated.Value(active ? 1 : 0)).current;
 
   useEffect(() => {
@@ -106,7 +130,7 @@ function PhenomenonChip({ label, active, onPress, theme, styles }) {
   });
   const borderColor = progress.interpolate({
     inputRange: [0, 1],
-    outputRange: ['rgba(0,0,0,0)', theme.accent],
+    outputRange: [theme.border, theme.accent],
   });
   const color = progress.interpolate({
     inputRange: [0, 1],
@@ -114,34 +138,50 @@ function PhenomenonChip({ label, active, onPress, theme, styles }) {
   });
 
   return (
-    <PressableScale onPress={onPress} scaleTo={0.97} activeOpacity={0.9}>
+    <PressableScale style={styles.chipWrap} onPress={onPress} scaleTo={0.97} activeOpacity={0.9}>
       <Animated.View style={[styles.phenomenonButton, { backgroundColor, borderColor }]}>
-        <Animated.Text style={[styles.phenomenonButtonText, { color }]}>{label}</Animated.Text>
+        <Animated.Text style={[styles.phenomenonButtonText, { color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+          {label}
+        </Animated.Text>
       </Animated.View>
     </PressableScale>
   );
-}
+});
 
 export default function WeatherPhenomenonFinder() {
   const navigation = useNavigation();
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { theme } = useTheme();
   const fs = useFontSize();
+  const { tempUnit } = useSettings();
   const titleOpacity = useRef(new Animated.Value(0)).current;
+
   useEffect(() => {
     Animated.timing(titleOpacity, {
       toValue: 1,
       duration: 300,
       useNativeDriver: true,
     }).start();
-  }, []);
+  }, [titleOpacity]);
+
   const [selectedPhenomenon, setSelectedPhenomenon] = useState('clear');
   const [loading, setLoading] = useState(false);
+  const [progressDone, setProgressDone] = useState(0);
   const [results, setResults] = useState([]);
   const [hasSearched, setHasSearched] = useState(false);
-  // 'offline' when the search couldn't reach the API at all (as opposed
-  // to a genuine "no cities match this phenomenon" empty result).
   const [searchError, setSearchError] = useState(null);
+  const [snapshotAt, setSnapshotAt] = useState(null);
+
+  const snapshotRef = useRef({ at: 0, items: null });
+  const abortRef = useRef(null);
+  const searchSeqRef = useRef(0);
+
+  useEffect(() => () => {
+    searchSeqRef.current += 1;
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch (e) {}
+    }
+  }, []);
 
   const styles = useMemo(() => StyleSheet.create({
     container: {
@@ -154,33 +194,58 @@ export default function WeatherPhenomenonFinder() {
       fontWeight: '700',
       color: theme.text,
       textAlign: 'center',
-      marginBottom: fs.spacing,
+      marginBottom: fs.spacing * 0.75,
     },
-    buttonContainer: {
-      gap: fs.spacing * 0.75,
-      marginBottom: fs.spacing,
+    buttonGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: fs.spacing * 0.5,
+      marginBottom: fs.spacing * 0.75,
+    },
+    chipWrap: {
+      flexGrow: 1,
+      flexBasis: '46%',
     },
     phenomenonButton: {
       backgroundColor: theme.surface,
       borderRadius: 12,
-      borderWidth: 2,
-      borderColor: 'transparent',
-      paddingVertical: fs.spacing * 0.9375,
-      paddingHorizontal: fs.spacing * 1.25,
+      borderWidth: 1.5,
+      borderColor: theme.border,
+      paddingVertical: fs.spacing * 0.7,
+      paddingHorizontal: fs.spacing * 0.75,
       alignItems: 'center',
-    },
-    phenomenonButtonActive: {
-      backgroundColor: theme.surfaceAlt,
-      borderWidth: 2,
-      borderColor: theme.accent,
     },
     phenomenonButtonText: {
       color: theme.textSecondary,
-      fontSize: fs.base,
+      fontSize: fs.base * 0.95,
       fontWeight: '600',
     },
-    phenomenonButtonTextActive: {
+    metaRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: fs.spacing * 0.625,
+      paddingHorizontal: 2,
+    },
+    metaText: {
+      color: theme.textMuted,
+      fontSize: fs.small,
+    },
+    refreshBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      paddingVertical: 4,
+      paddingHorizontal: 10,
+      borderRadius: 10,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.border,
+    },
+    refreshBtnText: {
       color: theme.accent,
+      fontSize: fs.small,
+      fontWeight: '600',
     },
     loadingContainer: {
       alignItems: 'center',
@@ -189,175 +254,257 @@ export default function WeatherPhenomenonFinder() {
     },
     loadingText: {
       color: theme.textMuted,
-      marginTop: fs.spacing,
+      marginTop: fs.spacing * 0.75,
       fontSize: fs.small,
     },
     listContent: {
-      gap: fs.spacing * 0.75,
+      gap: fs.spacing * 0.625,
+      paddingBottom: fs.spacing,
     },
     resultCard: {
       flexDirection: 'row',
       justifyContent: 'space-between',
       alignItems: 'center',
       backgroundColor: theme.surface,
-      borderRadius: 12,
-      paddingVertical: fs.spacing * 0.9375,
-      paddingHorizontal: fs.spacing * 1.25,
-      minHeight: fs.cardHeight,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: theme.border,
+      paddingVertical: fs.spacing * 0.8,
+      paddingHorizontal: fs.spacing * 1.1,
+      minHeight: fs.cardHeight * 0.9,
+    },
+    resultLeft: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: fs.spacing * 0.625,
+      flex: 1,
+      marginRight: fs.spacing * 0.5,
     },
     resultCity: {
       color: theme.text,
-      fontSize: fs.base * 1.125,
+      fontSize: fs.base * 1.08,
       fontWeight: '600',
+      flexShrink: 1,
     },
     resultTemp: {
       color: theme.accent,
       fontSize: fs.large,
-      fontWeight: '500',
+      fontWeight: '600',
+      fontVariant: ['tabular-nums'],
     },
     hintContainer: {
       flex: 1,
       alignItems: 'center',
       justifyContent: 'center',
+      paddingHorizontal: fs.spacing * 1.5,
+      gap: fs.spacing * 0.75,
     },
     hint: {
       color: theme.textMuted,
       fontSize: fs.base,
       textAlign: 'center',
-      paddingHorizontal: fs.spacing * 2,
+    },
+    retryBtn: {
+      backgroundColor: theme.accent,
+      borderRadius: 10,
+      paddingVertical: fs.spacing * 0.55,
+      paddingHorizontal: fs.spacing * 1.25,
+    },
+    retryBtnText: {
+      color: theme.onAccent,
+      fontSize: fs.base * 0.92,
+      fontWeight: '700',
     },
   }), [theme, fs]);
 
-  const handleSearch = async (phenomenon = selectedPhenomenon) => {
-    setLoading(true);
-    setResults([]);
-    setSearchError(null);
+  const filterSnapshot = useCallback((items, phenomenon) => {
+    return items
+      .filter((r) => r && r.weathercode !== null && isCodeInPhenomenon(r.weathercode, phenomenon))
+      .slice(0, 8);
+  }, []);
+
+  const handleSearch = useCallback(async (phenomenon, forceRefresh = false) => {
     setHasSearched(true);
+    setSearchError(null);
+
+    // Fast path: reuse recent 27-city snapshot when switching phenomenon chips.
+    const snap = snapshotRef.current;
+    if (!forceRefresh && snap.items && Date.now() - snap.at < SNAPSHOT_TTL_MS) {
+      setResults(filterSnapshot(snap.items, phenomenon));
+      setSnapshotAt(snap.at);
+      setLoading(false);
+      return;
+    }
+
+    const seq = ++searchSeqRef.current;
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch (e) {}
+    }
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const phFetch = (url) => fetchJsonWithRetry(url, { timeoutMs: 10000, retries: 1, signal: controller.signal });
+
+    setLoading(true);
+    setProgressDone(0);
+    setResults([]);
     try {
-      // No NetInfo gate (it reports the VPN tunnel, not reachability).
-      // Plain fetch() below used to hang forever on blackholed routes —
-      // each request gets its own 10s abort so a dead network ends in the
-      // truthful 'offline' state instead of an endless spinner.
-      // Provider layer per city: OM light `current` shape, normalized to
-      // current_weather by fetchForecast; 7Timer fallback when OM is down
-      // (shared circuit breaker skips the OM timeout after first failure).
-      const fetchPromises = CITIES.map(async (city) => {
-        try {
-          const data = await fetchForecast(
-            city.latitude,
-            city.longitude,
-            phFetch,
-            'https://api.open-meteo.com/v1/forecast?latitude=' +
-              city.latitude +
-              '&longitude=' +
-              city.longitude +
-              '&current=weather_code,temperature_2m'
-          );
-          const cw = data?.current_weather;
-          if (!cw || typeof cw.temperature !== 'number' || typeof cw.weathercode !== 'number') {
+      let done = 0;
+      const allResults = await mapWithConcurrency(
+        CITIES,
+        POLL_CONCURRENCY,
+        async (city) => {
+          try {
+            const data = await fetchForecast(
+              city.latitude,
+              city.longitude,
+              phFetch,
+              `https://api.open-meteo.com/v1/forecast?latitude=${city.latitude}&longitude=${city.longitude}&current=weather_code,temperature_2m`,
+            );
+            const cw = data?.current_weather;
+            if (!cw || typeof cw.temperature !== 'number' || typeof cw.weathercode !== 'number') {
+              return { ...city, temperature: null, weathercode: null };
+            }
+            return {
+              ...city,
+              temperature: cw.temperature,
+              weathercode: cw.weathercode,
+            };
+          } catch (e) {
+            if (isExternalAbortError(e)) throw e;
             return { ...city, temperature: null, weathercode: null };
+          } finally {
+            done += 1;
+            if (seq === searchSeqRef.current && !controller.signal.aborted) {
+              setProgressDone(done);
+            }
           }
-          return {
-            ...city,
-            temperature: Math.round(cw.temperature),
-            weathercode: cw.weathercode,
-          };
-        } catch (e) {
-          return { ...city, temperature: null, weathercode: null };
-        }
-      });
-      const allResults = await Promise.all(fetchPromises);
-      // If EVERY request failed (offline / VPN blocking DNS), say so
-      // instead of the misleading "no such phenomenon in the DB".
-      const allFailed = allResults.every(
-        (r) => r.weathercode === null && r.temperature === null
+        },
+        controller.signal,
       );
+
+      if (seq !== searchSeqRef.current || controller.signal.aborted) return;
+
+      const allFailed = allResults.every((r) => !r || (r.weathercode === null && r.temperature === null));
       if (allFailed) {
         setSearchError('offline');
         setResults([]);
         return;
       }
-      const matched = allResults
-        .filter((r) => {
-          const matches = r.weathercode !== null && isCodeInPhenomenon(r.weathercode, phenomenon);
-          return matches;
-        })
-        .slice(0, 5);
-      setResults(matched);
+
+      const now = Date.now();
+      snapshotRef.current = { at: now, items: allResults };
+      setSnapshotAt(now);
+      setResults(filterSnapshot(allResults, phenomenon));
     } catch (e) {
+      if (seq !== searchSeqRef.current || isExternalAbortError(e)) return;
       setSearchError('offline');
       setResults([]);
     } finally {
-      setLoading(false);
+      if (seq === searchSeqRef.current) {
+        setLoading(false);
+      }
     }
-  };
+  }, [filterSnapshot]);
 
-  const handlePress = (key) => {
+  const handlePress = useCallback((key) => {
     setSelectedPhenomenon(key);
-    handleSearch(key);
-  };
+    handleSearch(key, false);
+  }, [handleSearch]);
 
-  const renderButton = (key, index) => {
-    const isActive = selectedPhenomenon === key;
+  const handleForceRefresh = useCallback(() => {
+    handleSearch(selectedPhenomenon, true);
+  }, [handleSearch, selectedPhenomenon]);
+
+  const lang = i18n.language === 'en' ? 'en' : 'ru';
+
+  const renderItem = useCallback(({ item, index }) => {
+    const label = cityDisplayName(item, lang);
     return (
-      <FadeSlideIn key={key} delay={index * 30} distance={6}>
-        <PhenomenonChip
-          label={t(`phenomenon.${key}`)}
-          active={isActive}
-          onPress={() => handlePress(key)}
-          theme={theme}
-          styles={styles}
-        />
+      <FadeSlideIn delay={index * 35} distance={6}>
+        <PressableScale
+          style={styles.resultCard}
+          onPress={() =>
+            navigation.navigate('weather', {
+              city: label,
+              latitude: item.latitude,
+              longitude: item.longitude,
+              ts: Date.now(),
+            })
+          }
+          scaleTo={0.97}
+        >
+          <View style={styles.resultLeft}>
+            <WeatherIcon type={weathercodeToType(item.weathercode)} isNight={false} size={28} />
+            <Text style={styles.resultCity} numberOfLines={1}>{label}</Text>
+          </View>
+          <Text style={styles.resultTemp}>{formatTemp(item.temperature, tempUnit)}</Text>
+        </PressableScale>
       </FadeSlideIn>
     );
-  };
+  }, [lang, styles, navigation, tempUnit]);
 
-  const renderItem = ({ item, index }) => (
-    <FadeSlideIn delay={index * 40} distance={6}>
-      <PressableScale
-        style={styles.resultCard}
-        onPress={() => navigation.navigate('weather', { city: item.name })}
-        scaleTo={0.97}
-      >
-        <Text style={styles.resultCity}>{item.name}</Text>
-        <Text style={styles.resultTemp}>{item.temperature}°</Text>
-      </PressableScale>
-    </FadeSlideIn>
-  );
+  const keyExtractor = useCallback((item) => `${item.en}-${item.weathercode}`, []);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <Animated.Text style={[styles.title, { opacity: titleOpacity }]}>{t('weatherByPhenomena')}</Animated.Text>
-      <View style={styles.buttonContainer}>
-        {PHENOMENA_KEYS.map((key, index) => renderButton(key, index))}
+      <View style={styles.buttonGrid}>
+        {PHENOMENA_KEYS.map((key) => (
+          <PhenomenonChip
+            key={key}
+            label={t(`phenomenon.${key}`)}
+            active={selectedPhenomenon === key}
+            onPress={() => handlePress(key)}
+            theme={theme}
+            styles={styles}
+          />
+        ))}
       </View>
+      {snapshotAt && !loading ? (
+        <View style={styles.metaRow}>
+          <Text style={styles.metaText}>
+            {t('phenomenaCachedHint', { time: formatSnapTime(snapshotAt, lang) })}
+          </Text>
+          <PressableScale style={styles.refreshBtn} onPress={handleForceRefresh} scaleTo={0.95} haptic>
+            <Ionicons name="refresh" size={14} color={theme.accent} />
+            <Text style={styles.refreshBtnText}>{t('refresh')}</Text>
+          </PressableScale>
+        </View>
+      ) : null}
       {loading && (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={theme.accent} />
-          <Text style={styles.loadingText}>{t('loadingText')}</Text>
+          <Text style={styles.loadingText}>
+            {t('loadingCitiesProgress', { done: progressDone, total: CITIES.length })}
+          </Text>
         </View>
       )}
       {!loading && results.length > 0 && (
         <FlatList
           data={results}
-          keyExtractor={(item) => item.name + '-' + item.weathercode}
+          keyExtractor={keyExtractor}
           renderItem={renderItem}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
         />
       )}
       {!loading && results.length === 0 && (
-          <View style={styles.hintContainer}>
-            <FadeSlideIn distance={4}>
-              <Text style={styles.hint}>
-                {searchError === 'offline'
-                  ? t('noInternet')
-                  : hasSearched
-                    ? t('noResultsAfterSearch')
-                    : t('noResultsBeforeSearch')}
-              </Text>
-            </FadeSlideIn>
-          </View>
+        <View style={styles.hintContainer}>
+          <FadeSlideIn distance={4}>
+            <Text style={styles.hint}>
+              {searchError === 'offline'
+                ? t('noInternet')
+                : hasSearched
+                  ? t('noResultsAfterSearch')
+                  : t('noResultsBeforeSearch')}
+            </Text>
+          </FadeSlideIn>
+          {searchError === 'offline' && (
+            <PressableScale style={styles.retryBtn} onPress={handleForceRefresh} scaleTo={0.96} haptic>
+              <Text style={styles.retryBtnText}>{t('retry')}</Text>
+            </PressableScale>
+          )}
+        </View>
       )}
     </SafeAreaView>
   );
