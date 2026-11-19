@@ -49,9 +49,9 @@ const DISPLAY_W = (() => {
 import { useTranslation } from 'react-i18next';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import * as FileSystem from 'expo-file-system/legacy';
 import {
   listBackupFiles,
+  previewCitiesFromUri,
   importCitiesFromUri,
   deleteBackupFile,
   exportCities,
@@ -221,24 +221,12 @@ export default function CitiesImportModal({ visible, onClose, theme, fs, onImpor
     if (working) return;
     setWorking(true);
     try {
-      // Parse first so the confirm dialog states the real city count.
-      const text = await FileSystem.readAsStringAsync(path);
-      let parsed;
-      try {
-        parsed = JSON.parse(text);
-      } catch (e) {
-        showError(t('backupBadFile'));
-        return;
-      }
-      const arr = Array.isArray(parsed) ? parsed : parsed?.cities;
-      const count = Array.isArray(arr) ? arr.length : 0;
-      if (count === 0) {
-        showError(t('backupBadFile'));
-        return;
-      }
+      const { count, skipped } = await previewCitiesFromUri(path);
       showAlert({
         title: t('backupReplaceTitle'),
-        message: t('backupReplaceMsg', { count }),
+        message: skipped > 0
+          ? t('backupReplaceSkippedMsg', { count, skipped })
+          : t('backupReplaceMsg', { count }),
         buttons: [
           { text: t('cancel'), style: 'cancel' },
           {
