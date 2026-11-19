@@ -10,6 +10,11 @@ import {
   formatTemp,
   computeCityClock,
   convertTemp,
+  windDirectionKey,
+  hpaToMmHg,
+  computeWeeklyTempBounds,
+  computeDayRangeFractions,
+  extractCurrentExtras,
 } from '../utils/weatherFormat.js';
 
 test('weathercodeToType maps WMO codes to icon buckets', () => {
@@ -107,4 +112,58 @@ test('getHourlyTimeline starts at the current hour of the city and interleaves s
   assert.ok(items.some((i) => i.type === 'sunrise' && i.time === sunrise));
   const times = items.map((i) => i.time);
   assert.deepEqual([...times].sort(), times, 'items are sorted by time');
+});
+
+test('null and NaN inputs are formatted safely without fake 0° or 32°', () => {
+  assert.equal(convertTemp(null, 'C'), null);
+  assert.equal(convertTemp(undefined, 'F'), null);
+  assert.equal(convertTemp(NaN, 'C'), null);
+  assert.equal(formatTemp(null, 'C'), '–');
+  assert.equal(formatTemp(undefined, 'F'), '–');
+  assert.equal(formatTemp(-0.2, 'C'), '0°');
+  assert.equal(convertWind(null, 'kmh'), null);
+  assert.equal(convertWind(NaN, 'ms'), null);
+});
+
+test('windDirectionKey maps degrees to 8 compass points', () => {
+  assert.equal(windDirectionKey(0), 'N');
+  assert.equal(windDirectionKey(359), 'N');
+  assert.equal(windDirectionKey(45), 'NE');
+  assert.equal(windDirectionKey(90), 'E');
+  assert.equal(windDirectionKey(225), 'SW');
+  assert.equal(windDirectionKey(-90), 'W');
+  assert.equal(windDirectionKey(null), null);
+});
+
+test('hpaToMmHg converts pressure safely', () => {
+  assert.equal(hpaToMmHg(1013.25), 760);
+  assert.equal(hpaToMmHg(0), null);
+  assert.equal(hpaToMmHg(-5), null);
+  assert.equal(hpaToMmHg(null), null);
+});
+
+test('weekly temperature bounds and range fractions', () => {
+  const daily = { temperature_2m_min: [10, 5, null], temperature_2m_max: [20, 25, 15] };
+  assert.deepEqual(computeWeeklyTempBounds(daily), { min: 5, max: 25 });
+  assert.equal(computeWeeklyTempBounds(null), null);
+
+  const frac = computeDayRangeFractions(10, 20, 5, 25);
+  assert.equal(frac.leftPct, 25);
+  assert.equal(frac.widthPct, 50);
+
+  const flat = computeDayRangeFractions(12, 12, 12, 12);
+  assert.deepEqual(flat, { leftPct: 0, widthPct: 100 });
+
+  assert.equal(computeDayRangeFractions(null, 20, 5, 25), null);
+});
+
+test('extractCurrentExtras reads Open-Meteo current fields and degrades cleanly on 7Timer', () => {
+  const om = extractCurrentExtras({
+    current_weather: { winddirection: 180 },
+    current: { apparent_temperature: 14.5, relative_humidity_2m: 62, surface_pressure: 1015, precipitation_probability: 35 },
+  });
+  assert.deepEqual(om, { feelsLike: 14.5, humidity: 62, pressureHpa: 1015, windDirection: 180, precipProb: 35 });
+
+  const st = extractCurrentExtras({ current_weather: { temperature: 10, winddirection: 90 } });
+  assert.deepEqual(st, { feelsLike: null, humidity: null, pressureHpa: null, windDirection: 90, precipProb: null });
 });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { HttpError, fetchJsonWithRetry, isRetryableStatus, retryDelayMs } from '../utils/http.js';
+import { HttpError, fetchJsonWithRetry, isRetryableStatus, retryDelayMs, isExternalAbortError } from '../utils/http.js';
 
 const json = (status, body, headers = {}) => ({
   ok: status >= 200 && status < 300,
@@ -88,6 +88,40 @@ test('timeout aborts a hanging request with AbortError', async () => {
         }),
       sleep: noSleep,
     }),
-    (e) => e.name === 'AbortError'
+    (e) => e.name === 'AbortError' && e.isTimeout === true && !isExternalAbortError(e)
   );
+});
+
+test('pre-aborted external signal rejects immediately without calling fetch', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  await assert.rejects(
+    fetchJsonWithRetry('u', {
+      signal: controller.signal,
+      fetchImpl: async () => (calls++, json(200, {})),
+      sleep: noSleep,
+    }),
+    (e) => isExternalAbortError(e)
+  );
+  assert.equal(calls, 0);
+});
+
+test('external signal aborts during retry backoff without a second fetch', async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  await assert.rejects(
+    fetchJsonWithRetry('u', {
+      retries: 2,
+      baseDelayMs: 5000,
+      signal: controller.signal,
+      fetchImpl: async () => {
+        calls++;
+        setTimeout(() => controller.abort(), 15);
+        return json(503, {});
+      },
+    }),
+    (e) => isExternalAbortError(e)
+  );
+  assert.equal(calls, 1);
 });
