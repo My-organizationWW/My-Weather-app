@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Animated, Easing, StyleSheet, View } from 'react-native';
 import Svg, { Circle, Defs, G, Line, Path, RadialGradient, Rect, Stop } from 'react-native-svg';
 import { useTheme } from '../../ThemeContext';
@@ -578,7 +578,7 @@ function SpinningSun({ cx = 32, cy = 32, s = 1.25, duration = 30000 }) {
   );
 }
 
-function WeatherIcon({ type = 'clear', isNight = false, size = 96 }) {
+const WeatherIcon = React.memo(function WeatherIcon({ type = 'clear', isNight = false, size = 96 }) {
   if (type === 'thunder') {
     return <ThunderWeather size={size} />;
   }
@@ -605,18 +605,8 @@ function WeatherIcon({ type = 'clear', isNight = false, size = 96 }) {
       spinningSun = { cx: 22, cy: 20, s: 0.85 };
     }
     driftingCloud = { fill: ICON_COLORS.cloudDark, offsetX: 4, offsetY: 8, s: 0.85 };
-  } else if (type === 'fog') {
-    content = (
-      <G>
-        <Line x1={14} y1={53} x2={50} y2={53} stroke={ICON_COLORS.fog} strokeWidth={3.5} strokeLinecap="round" />
-        <Line x1={20} y1={59} x2={44} y2={59} stroke={ICON_COLORS.fog} strokeWidth={3.5} strokeLinecap="round" />
-      </G>
-    );
-    driftingCloud = { fill: ICON_COLORS.cloudDark, offsetY: -6 };
   } else if (type === 'snow') {
     content = <CloudShape y={-2} fill={ICON_COLORS.cloudDark} />;
-  } else if (type === 'fog') {
-    content = null;
   } else {
     content = (
       <CloudShape y={-2} fill={type === 'showers' ? ICON_COLORS.cloudDark : ICON_COLORS.cloudLight} />
@@ -633,9 +623,9 @@ function WeatherIcon({ type = 'clear', isNight = false, size = 96 }) {
       {driftingCloud && <DriftCloud size={size} {...driftingCloud} />}
     </View>
   );
-}
+});
 
-function SunAnimation({ size = 96 }) {
+const SunAnimation = React.memo(function SunAnimation({ size = 96 }) {
   const rotate = useRef(new Animated.Value(0)).current;
   const scale = useRef(new Animated.Value(1)).current;
 
@@ -676,9 +666,9 @@ function SunAnimation({ size = 96 }) {
       </Svg>
     </Animated.View>
   );
-}
+});
 
-function FogAnimation({ size = 140 }) {
+const FogAnimation = React.memo(function FogAnimation({ size = 140 }) {
   const anim1 = useRef(new Animated.Value(0)).current;
   const anim2 = useRef(new Animated.Value(0)).current;
   const anim3 = useRef(new Animated.Value(0)).current;
@@ -777,7 +767,7 @@ function FogAnimation({ size = 140 }) {
       </Svg>
     </View>
   );
-}
+});
 
 const AnimatedLine = Animated.createAnimatedComponent(Line);
 
