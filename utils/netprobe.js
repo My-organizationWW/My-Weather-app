@@ -52,22 +52,38 @@ export const NETPROBE_ENDPOINTS = [
   },
 ];
 
-async function fetchWithTimeout(url, ms, headers) {
+async function fetchWithTimeout(url, ms, headers, externalSignal) {
   const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      err.isExternalAbort = true;
+      throw err;
+    }
+    externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), ms);
   try {
     return await fetch(url, { signal: controller.signal, headers });
+  } catch (e) {
+    if (externalSignal?.aborted && e) {
+      e.isExternalAbort = true;
+    }
+    throw e;
   } finally {
     clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
   }
 }
 
 // Ground truth for "is it DNS?": ask Google DoH directly. If DoH resolves
 // the host but the endpoint probe failed, the system resolver/route is at
 // fault; if DoH fails too, the device has no usable route at all.
-export async function checkDns(host) {
+export async function checkDns(host, signal) {
   try {
-    const res = await fetchWithTimeout(`https://dns.google/resolve?name=${host}&type=A`, DNS_TIMEOUT_MS);
+    const res = await fetchWithTimeout(`https://dns.google/resolve?name=${host}&type=A`, DNS_TIMEOUT_MS, undefined, signal);
     if (!res.ok) return false;
     const data = await res.json();
     return data?.Status === 0 && Array.isArray(data?.Answer) && data.Answer.length > 0;
@@ -76,20 +92,42 @@ export async function checkDns(host) {
   }
 }
 
-export async function probeEndpoint(ep) {
+export async function probeEndpoint(ep, signal) {
   const started = Date.now();
   try {
-    const res = await fetchWithTimeout(ep.url, PROBE_TIMEOUT_MS, ep.headers);
+    const res = await fetchWithTimeout(ep.url, PROBE_TIMEOUT_MS, ep.headers, signal);
     const ms = Date.now() - started;
     if (res.ok) return { id: ep.id, verdict: 'ok', ms };
     return { id: ep.id, verdict: 'http', detail: res.status, ms };
   } catch (e) {
+    if (e?.isExternalAbort || signal?.aborted) {
+      return { id: ep.id, verdict: 'cancelled', ms: Date.now() - started };
+    }
     const ms = Date.now() - started;
     const timedOut = e?.name === 'AbortError';
-    const dnsOk = await checkDns(ep.host);
+    const dnsOk = await checkDns(ep.host, signal);
+    if (signal?.aborted) {
+      return { id: ep.id, verdict: 'cancelled', ms: Date.now() - started };
+    }
     if (!dnsOk) return { id: ep.id, verdict: 'offline', ms };
     return { id: ep.id, verdict: timedOut ? 'timeout' : 'blocked', ms };
   }
 }
 
-export const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+export const sleep = (ms, signal) =>
+  new Promise((res) => {
+    if (signal?.aborted) return res();
+    const timer = setTimeout(() => {
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      res();
+    }, ms);
+    const onAbort = signal
+      ? () => {
+          clearTimeout(timer);
+          res();
+        }
+      : null;
+    if (signal && onAbort) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });

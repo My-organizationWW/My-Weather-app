@@ -1300,8 +1300,8 @@ export default function SettingsScreen() {
                 <Ionicons name="document-text" size={fs.iconSize * 0.77} color={theme.text} />
               </View>
               <View style={[styles.cardTextWrap, { flex: 1, flexDirection: 'row', alignItems: 'center' }]}>
-                <Text style={[styles.cardTitle, { flex: 1, flexShrink: 1 }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>Логи ошибок</Text>
-                <Text style={[styles.cardDesc, { marginLeft: 10, marginTop: 0, flexShrink: 0, marginRight: 8 }]} numberOfLines={1}>Просмотр и отправка</Text>
+                <Text style={[styles.cardTitle, { flex: 1, flexShrink: 1 }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>{tr('crashLogsTitle')}</Text>
+                <Text style={[styles.cardDesc, { marginLeft: 10, marginTop: 0, flexShrink: 0, marginRight: 8 }]} numberOfLines={1}>{tr('crashLogsDesc')}</Text>
               </View>
               <Text style={styles.chevron}>›</Text>
             </PressableScale>

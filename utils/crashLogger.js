@@ -2,6 +2,29 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { getAppStorageRoot, ensureDir } from './appStorage';
 
 export const INTERNAL_LOG_FOLDER = 'logs';
+export const MAX_LOG_FILES = 20;
+export const MAX_LOG_CHARS = 64 * 1024;
+
+function trimLogContent(content) {
+  const s = String(content || '');
+  if (s.length <= MAX_LOG_CHARS) return s;
+  return `${s.slice(0, MAX_LOG_CHARS)}\n\n[...truncated at ${MAX_LOG_CHARS} chars]`;
+}
+
+async function pruneOldLogs(dir, trailingSlash) {
+  try {
+    const names = await FileSystem.readDirectoryAsync(dir);
+    const crashNames = names
+      .filter((name) => name.startsWith('crash_') && name.endsWith('.txt'))
+      .sort()
+      .reverse();
+    const toDelete = crashNames.slice(MAX_LOG_FILES);
+    for (const name of toDelete) {
+      const path = trailingSlash ? `${dir}${name}` : `${dir}/${name}`;
+      await FileSystem.deleteAsync(path, { idempotent: true }).catch(() => {});
+    }
+  } catch (e) {}
+}
 
 // ---------------------------------------------------------------------------
 // Internal sandbox: /data/user/0/<package>/files/logs (always writable,
@@ -21,7 +44,8 @@ async function writeInternal(timestamp, content) {
     await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
   }
   const filePath = `${dir}/crash_${timestamp}.txt`;
-  await FileSystem.writeAsStringAsync(filePath, content);
+  await FileSystem.writeAsStringAsync(filePath, trimLogContent(content));
+  await pruneOldLogs(dir, false);
   return filePath;
 }
 
@@ -73,7 +97,8 @@ export async function ensurePublicLogDir() {
 async function writePublic(timestamp, content) {
   const dir = await ensurePublicLogDir();
   const filePath = `${dir}crash_${timestamp}.txt`;
-  await FileSystem.writeAsStringAsync(filePath, content);
+  await FileSystem.writeAsStringAsync(filePath, trimLogContent(content));
+  await pruneOldLogs(dir, true);
   return filePath;
 }
 
