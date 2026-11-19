@@ -5,7 +5,6 @@ import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
   Pressable,
   Platform,
   ToastAndroid,
@@ -13,35 +12,24 @@ import {
   ActivityIndicator,
   ScrollView,
   RefreshControl,
-   Alert,
-   Animated,
-   Easing,
-   Switch,
-   Dimensions,
-   Linking,
-   Image,
-   StatusBar,
-   Modal,
-   TouchableWithoutFeedback,
-   Keyboard,
-   SafeAreaView,
-  } from 'react-native';
+  Alert,
+  Animated,
+  Easing,
+  Linking,
+  Modal,
+  TouchableWithoutFeedback,
+  Keyboard,
+} from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
- import ScreenWrapper from './ScreenWrapper';
+import ScreenWrapper from './ScreenWrapper';
 import PressableScale from './components/PressableScale';
 import FadeSlideIn from './components/FadeSlideIn';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Circle, Defs, G, Line, Path, RadialGradient, Rect, Stop } from 'react-native-svg';
-import { LinearGradient } from 'expo-linear-gradient';
-import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
-import {
-  THEME_MODES,
-} from './themes';
 import { useRoute, useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useTranslation } from 'react-i18next';
-import i18n, { changeLanguage } from './i18n';
+import i18n from './i18n';
 import { LoadingContext } from './LoadingContext';
 import { SettingsContext } from './SettingsContext';
 import { useFontSize } from './FontSizeContext';
@@ -49,8 +37,8 @@ import { useTheme } from './ThemeContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { isOfflineError, isRegionLike, resolvePlaceName } from './geocoding';
 import { fetchForecast, searchCity } from './utils/weatherProviders';
-import { fetchJsonWithRetry, HttpError } from './utils/http';
-import { GithubIcon, WeatherIcon, SunAnimation, FogAnimation } from './components/weather/WeatherIcons';
+import { fetchJsonWithRetry, HttpError, isExternalAbortError } from './utils/http';
+import { WeatherIcon, SunAnimation, FogAnimation } from './components/weather/WeatherIcons';
 import {
   weathercodeToType,
   isNightHour,
@@ -59,22 +47,24 @@ import {
   beaufortFromMs,
   convertWind,
   formatTemp,
+  windDirectionKey,
+  hpaToMmHg,
+  computeWeeklyTempBounds,
+  computeDayRangeFractions,
+  extractCurrentExtras,
   computeCityClock,
 } from './utils/weatherFormat';
 
 const BASE_URL = 'https://api.open-meteo.com/v1/forecast';
 const TIMEOUT_MS = 10000;
-const SCREEN_WIDTH = Dimensions.get('window').width;
-const APP_VERSION = require('./package.json').version;
-const APP_ICON_SOURCE = require('./assets/icon.png');
-const GITHUB_URL = 'https://github.com/werxuiiika/My-Weather-app';
+const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim: 'Nominatim' };
 
 const REMEMBER_CITY_ENABLED_KEY = 'remember_city_enabled';
 const LAST_CITY_KEY = 'last_selected_city';
+const LAST_WEATHER_KEY = 'last_weather_data';
 
 const loadLastCity = async () => { try { return await AsyncStorage.getItem(LAST_CITY_KEY); } catch (e) { return null; } };
 // Cache-First: last successfully loaded weather snapshot for instant display.
-const LAST_WEATHER_KEY = 'last_weather_data';
 const loadCachedWeather = async () => {
   try {
     const raw = await AsyncStorage.getItem(LAST_WEATHER_KEY);
@@ -88,23 +78,20 @@ const saveCachedWeather = async (snapshot) => {
   try { await AsyncStorage.setItem(LAST_WEATHER_KEY, JSON.stringify(snapshot)); } catch (e) {}
 };
 const saveLastCity = async (name) => { try { await AsyncStorage.setItem(LAST_CITY_KEY, name); } catch (e) {} };
-const clearLastCity = async () => { try { await AsyncStorage.removeItem(LAST_CITY_KEY); } catch (e) {} };
 const loadRememberCity = async () => { try { const v = await AsyncStorage.getItem(REMEMBER_CITY_ENABLED_KEY); return v === null ? true : v === 'true'; } catch (e) { return true; } };
-const saveRememberCity = async (value) => {
-  try {
-    await AsyncStorage.setItem(REMEMBER_CITY_ENABLED_KEY, value ? 'true' : 'false');
-    if (!value) {
-      await clearLastCity();
-    }
-  } catch (e) {}
-};
 
-const fetchJson = async (url) => {
+const makeFetchJson = (signal) => async (url) => {
   try {
-    return await fetchJsonWithRetry(url, { timeoutMs: TIMEOUT_MS });
+    return await fetchJsonWithRetry(url, { timeoutMs: TIMEOUT_MS, signal });
   } catch (e) {
-    if (e instanceof TypeError || (e && e.name === 'AbortError')) {
-      const err = new Error(e instanceof TypeError ? i18n.t('noInternet') : i18n.t('serverTimeout'));
+    if (isExternalAbortError(e)) throw e;
+    if (e?.isTimeout || (e && e.name === 'AbortError')) {
+      const err = new Error(i18n.t('serverTimeout'));
+      err.kind = 'timeout';
+      throw err;
+    }
+    if (e instanceof TypeError) {
+      const err = new Error(i18n.t('noInternet'));
       err.kind = 'network';
       throw err;
     }
@@ -118,31 +105,25 @@ const fetchJson = async (url) => {
   }
 };
 
-
-const TEMP_UNIT_OPTIONS = [
-  { value: 'C', labelKey: 'tempUnits.C.label', descKey: 'tempUnits.C.desc' },
-  { value: 'F', labelKey: 'tempUnits.F.label', descKey: 'tempUnits.F.desc' },
-];
-
-const WIND_UNIT_OPTIONS = [
-  { value: 'kmh', labelKey: 'windUnits.kmh.label', descKey: 'windUnits.kmh.desc' },
-  { value: 'ms', labelKey: 'windUnits.ms.label', descKey: 'windUnits.ms.desc' },
-  { value: 'mph', labelKey: 'windUnits.mph.label', descKey: 'windUnits.mph.desc' },
-  { value: 'knots', labelKey: 'windUnits.knots.label', descKey: 'windUnits.knots.desc' },
-  { value: 'beaufort', labelKey: 'windUnits.beaufort.label', descKey: 'windUnits.beaufort.desc' },
-];
-
-const LANGUAGE_OPTIONS = [
-  { value: 'ru', labelKey: 'russian' },
-  { value: 'en', labelKey: 'english' },
-];
-
-
-function formatWind(speedKmh, unit) {
-  if (unit === 'beaufort') return `${beaufortFromMs(speedKmh / 3.6)} ${i18n.t('windLabels.beaufort')}`;
+function formatWind(speedKmh, unit, directionDeg = null) {
   const v = convertWind(speedKmh, unit);
-  if (unit === 'kmh') return `${Math.round(v)} ${i18n.t('windLabels.kmh')}`;
-  return `${v.toFixed(1)} ${i18n.t(`windLabels.${unit}`) || i18n.t('windLabels.kmh')}`;
+  if (v === null) return '–';
+  let text;
+  if (unit === 'beaufort') {
+    text = `${beaufortFromMs(speedKmh / 3.6)} ${i18n.t('windLabels.beaufort')}`;
+  } else if (unit === 'kmh') {
+    text = `${Math.round(v)} ${i18n.t('windLabels.kmh')}`;
+  } else {
+    text = `${v.toFixed(1)} ${i18n.t(`windLabels.${unit}`) || i18n.t('windLabels.kmh')}`;
+  }
+  const dirKey = windDirectionKey(directionDeg);
+  if (dirKey) {
+    const dirLabel = i18n.t(`windDir.${dirKey}`);
+    if (dirLabel && dirLabel !== `windDir.${dirKey}`) {
+      return `${text} · ${dirLabel}`;
+    }
+  }
+  return text;
 }
 
 // Fade+rise the hero block when the displayed city changes (or on first
@@ -236,12 +217,9 @@ function CrossfadeValue({ style, value }) {
 
 export default function App() {
   const { t: tr } = useTranslation();
-  const { theme, setThemeMode, themeMode, loaded: themeLoaded } = useTheme();
+  const { theme, loaded: themeLoaded } = useTheme();
   const insets = useSafeAreaInsets();
   const [isConnected, setIsConnected] = useState(null);
-  const updateConnection = (value) => {
-    setIsConnected(value);
-  };
   const [city, setCity] = useState('');
   const [loading, setLoading] = useState(false);
   const [locating, setLocating] = useState(false);
@@ -259,12 +237,32 @@ export default function App() {
   const [isSplashVisible, setIsSplashVisible] = useState(true);
   const [isContentVisible, setIsContentVisible] = useState(false);
   const [splashRendered, setSplashRendered] = useState(true);
-   const [menuVisible, setMenuVisible] = useState(false);
-   const [settingsOpen, setSettingsOpen] = useState(false);
-   const [permissionModalVisible, setPermissionModalVisible] = useState(false);
+  const [menuVisible, setMenuVisible] = useState(false);
+  const [permissionModalVisible, setPermissionModalVisible] = useState(false);
   const menuAnim = useRef(new Animated.Value(0)).current;
 
-  const toggleMenu = () => {
+  // Monotonic request guard + active AbortController so rapid city switches
+  // or background refreshes never overwrite newer user selections.
+  const requestSeqRef = useRef(0);
+  const abortControllerRef = useRef(null);
+  const beginRequest = useCallback(() => {
+    const seq = ++requestSeqRef.current;
+    if (abortControllerRef.current) {
+      try { abortControllerRef.current.abort(); } catch (e) {}
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    return { seq, signal: controller.signal };
+  }, []);
+
+  useEffect(() => () => {
+    requestSeqRef.current += 1;
+    if (abortControllerRef.current) {
+      try { abortControllerRef.current.abort(); } catch (e) {}
+    }
+  }, []);
+
+  const toggleMenu = useCallback(() => {
     if (menuVisible) {
       Animated.timing(menuAnim, {
         toValue: 0,
@@ -279,31 +277,25 @@ export default function App() {
         useNativeDriver: true,
       }).start();
     }
-  };
+  }, [menuVisible, menuAnim]);
 
-  const closeMenu = () => {
+  const closeMenu = useCallback(() => {
     Animated.timing(menuAnim, {
       toValue: 0,
       duration: 200,
       useNativeDriver: true,
     }).start(() => setMenuVisible(false));
-  };
+  }, [menuAnim]);
 
-  const menuScale = menuAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.9, 1],
-  });
+  const menuScale = useMemo(
+    () => menuAnim.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] }),
+    [menuAnim],
+  );
+  const menuOpacity = useMemo(
+    () => menuAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 1] }),
+    [menuAnim],
+  );
 
-  const menuOpacity = menuAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, 1],
-  });
-  const [rememberCity, setRememberCity] = useState(true);
-  const [themePickerVisible, setThemePickerVisible] = useState(false);
-  const [unitPickerVisible, setUnitPickerVisible] = useState(false);
-  const [unitPickerMode, setUnitPickerMode] = useState('temp');
-  const [languagePickerVisible, setLanguagePickerVisible] = useState(false);
-  const [tempPickerAnim] = useState(() => new Animated.Value(0));
   const lastRequest = useRef(null);
   const weatherRef = useRef(null);
   const rememberRef = useRef(true);
@@ -311,10 +303,6 @@ export default function App() {
   const contentOpacity = useRef(new Animated.Value(0)).current;
   const sunScale = useRef(new Animated.Value(1)).current;
   const sunRotate = useRef(new Animated.Value(0)).current;
-  const settingsOverlayOpacity = useRef(new Animated.Value(0)).current;
-  const settingsScreenX = useRef(new Animated.Value(SCREEN_WIDTH)).current;
-  const pickerAnim = useRef(new Animated.Value(0)).current;
-  const languagePickerAnim = useRef(new Animated.Value(0)).current;
   const placeholderAnim = useRef(new Animated.Value(city.length === 0 ? 1 : 0)).current;
   const clearButtonAnim = useRef(new Animated.Value(city.length > 0 ? 1 : 0)).current;
 
@@ -334,63 +322,73 @@ export default function App() {
         useNativeDriver: true,
       }),
     ]).start();
-  }, [city]);
+  }, [city, placeholderAnim, clearButtonAnim]);
+
   const fs = useFontSize();
-  const styles = useMemo(() => buildStyles(theme, fs || { spacing: 16, base: 16, small: 12, large: 20, iconSize: 24, cardHeight: 80 }, insets), [theme, fs, insets]);
-  const currentThemeLabel = useMemo(() => {
-    const found = THEME_MODES.find((m) => m.value === themeMode);
-    return found ? tr(found.labelKey) : tr('themeModes.author.label');
-  }, [themeMode, tr]);
+  const styles = useMemo(
+    () => buildStyles(theme, fs || { spacing: 16, base: 16, small: 12, large: 20, iconSize: 24, cardHeight: 80 }, insets),
+    [theme, fs, insets],
+  );
   const route = useRoute();
   const navigation = useNavigation();
   const cityParam = route.params?.city ?? route.params?.selectedCity;
+  const latParam = route.params?.latitude;
+  const lonParam = route.params?.longitude;
+  const countryParam = route.params?.country;
+  const navTsParam = route.params?.ts;
   const appliedCityParam = useRef(null);
-  const { isLoading, setLoading: setAppLoading } = useContext(LoadingContext);
-  const { tempUnit, windUnit, setTempUnit, setWindUnit, showSourceBadge } = useContext(SettingsContext);
+  const { setLoading: setAppLoading } = useContext(LoadingContext);
+  const { tempUnit, windUnit, showSourceBadge } = useContext(SettingsContext);
 
-// Display names for the live data source badge (keys = `source` field).
-const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim: 'Nominatim' };
-  const refreshColors =
-    theme.mode === 'light' ? ['#3573c2', '#25945a'] : ['#4a90d9', '#38b06b'];
-  const switchTrackOff = theme.mode === 'light' ? '#c9d3e6' : '#3a4560';
+  const refreshColors = useMemo(
+    () => (theme.mode === 'light' ? ['#3573c2', '#25945a'] : ['#4a90d9', '#38b06b']),
+    [theme.mode],
+  );
+
+  // Dismiss splash screen once timer elapses.
   useEffect(() => {
+    const timer = setTimeout(() => {
+      setIsSplashVisible(false);
+      setIsContentVisible(true);
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Only drive the loading/splash sun animation while it is actually on screen.
+  const sunAnimActive = splashRendered || ((loading || locating) && !weather);
+  useEffect(() => {
+    if (!sunAnimActive) return;
     const spin = Animated.loop(
-      Animated.timing(sunRotate, { toValue: 1, duration: 6000, useNativeDriver: true })
+      Animated.timing(sunRotate, { toValue: 1, duration: 6000, easing: Easing.linear, useNativeDriver: true }),
     );
     const pulse = Animated.loop(
       Animated.sequence([
         Animated.timing(sunScale, { toValue: 1.15, duration: 900, useNativeDriver: true }),
         Animated.timing(sunScale, { toValue: 1, duration: 900, useNativeDriver: true }),
-      ])
+      ]),
     );
     spin.start();
     pulse.start();
-    const timer = setTimeout(() => {
-      setIsSplashVisible(false);
-      setIsContentVisible(true);
-    }, 1500);
     return () => {
       spin.stop();
       pulse.stop();
-      clearTimeout(timer);
     };
-  }, []);
+  }, [sunAnimActive, sunRotate, sunScale]);
+
   useEffect(() => {
     let active = true;
     const init = async () => {
-      const state = await NetInfo.fetch();
+      // Read connection state + Cache-First storage keys in parallel for fast startup.
+      const [netState, remember, saved, cached] = await Promise.all([
+        NetInfo.fetch().catch(() => ({ isConnected: true })),
+        loadRememberCity(),
+        loadLastCity(),
+        loadCachedWeather(),
+      ]);
       if (!active) return;
-      updateConnection(!!state.isConnected);
-      const remember = await loadRememberCity();
-      if (!active) return;
+      setIsConnected(!!netState.isConnected);
       rememberRef.current = remember;
-      setRememberCity(remember);
-      const saved = await loadLastCity();
-      if (!active) return;
-      // Cache-First: show the last snapshot instantly (no spinner),
-      // then refresh it in the background.
-      const cached = await loadCachedWeather();
-      if (!active) return;
+
       let hasCache = false;
       if (cached) {
         hasCache = true;
@@ -424,180 +422,59 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
     };
     init();
     const unsubscribe = NetInfo.addEventListener((state) => {
-      updateConnection(!!state.isConnected);
+      setIsConnected(!!state.isConnected);
       if (!state.isConnected) {
         setHostUnreachable(false);
       }
     });
-     return () => {
-       active = false;
-       unsubscribe();
-     };
-   }, []);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       (async () => {
         const remember = await loadRememberCity();
         rememberRef.current = remember;
-        setRememberCity(remember);
       })();
-    }, [])
+    }, []),
   );
-   useEffect(() => {
-     if (!isSplashVisible) {
+
+  useEffect(() => {
+    if (!isSplashVisible) {
       Animated.timing(splashOpacity, { toValue: 0, duration: 500, useNativeDriver: true }).start(
         ({ finished }) => {
           if (finished) setSplashRendered(false);
-        }
+        },
       );
     }
-  }, [isSplashVisible]);
+  }, [isSplashVisible, splashOpacity]);
+
   useEffect(() => {
     if (isContentVisible) {
       Animated.timing(contentOpacity, { toValue: 1, duration: 500, useNativeDriver: true }).start();
     }
-  }, [isContentVisible]);
-  useEffect(() => {
-    if (!settingsOpen) return;
-    Animated.parallel([
-      Animated.timing(settingsOverlayOpacity, {
-        toValue: 1,
-        duration: 300,
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
-      }),
-      Animated.timing(settingsScreenX, {
-        toValue: 0,
-        duration: 300,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [settingsOpen]);
-  useEffect(() => {
-    if (!themePickerVisible) return;
-    Animated.timing(pickerAnim, {
-      toValue: 1,
-      duration: 200,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [themePickerVisible]);
-  useEffect(() => {
-    if (!unitPickerVisible) return;
-    Animated.timing(tempPickerAnim, {
-      toValue: 1,
-      duration: 200,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [unitPickerVisible]);
-  useEffect(() => {
-    if (!languagePickerVisible) return;
-    Animated.timing(languagePickerAnim, {
-      toValue: 1,
-      duration: 200,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [languagePickerVisible]);
-  const openSettings = () => {
+  }, [isContentVisible, contentOpacity]);
+
+  const openSettings = useCallback(() => {
     navigation.getParent()?.navigate('Settings');
-  };
-  const closeSettings = () => {
-    if (themePickerVisible) closeThemePicker();
-    if (languagePickerVisible) closeLanguagePicker();
-    Animated.parallel([
-      Animated.timing(settingsOverlayOpacity, {
-        toValue: 0,
-        duration: 240,
-        easing: Easing.in(Easing.quad),
-        useNativeDriver: true,
-      }),
-      Animated.timing(settingsScreenX, {
-        toValue: SCREEN_WIDTH,
-        duration: 280,
-        easing: Easing.in(Easing.cubic),
-        useNativeDriver: true,
-      }),
-    ]).start(({ finished }) => {
-      if (finished) setSettingsOpen(false);
-    });
-  };
-  const openThemePicker = () => {
-    pickerAnim.setValue(0);
-    setThemePickerVisible(true);
-  };
-  const closeThemePicker = () => {
-    Animated.timing(pickerAnim, {
-      toValue: 0,
-      duration: 180,
-      easing: Easing.in(Easing.quad),
-      useNativeDriver: true,
-    }).start(({ finished }) => {
-      if (finished) setThemePickerVisible(false);
-    });
-  };
-  const selectThemeMode = async (value) => {
-    setThemeMode(value);
-    closeThemePicker();
-  };
-  const toggleRemember = async (value) => {
-    setRememberCity(value);
-    rememberRef.current = value;
-    await saveRememberCity(value);
-  };
-  const showUnitPicker = (mode) => {
-    setUnitPickerMode(mode);
-    tempPickerAnim.setValue(0);
-    setUnitPickerVisible(true);
-  };
-  const hideUnitPicker = () => {
-    Animated.timing(tempPickerAnim, {
-      toValue: 0,
-      duration: 180,
-      easing: Easing.in(Easing.quad),
-      useNativeDriver: true,
-    }).start(({ finished }) => {
-      if (finished) setUnitPickerVisible(false);
-    });
-  };
-  const onSelectUnit = async (value) => {
-    if (unitPickerMode === 'temp') {
-      await setTempUnit(value);
+  }, [navigation]);
+
+  const applyFetchError = (e) => {
+    if (isExternalAbortError(e)) return;
+    if (e?.kind === 'timeout') {
+      setError(null);
+      setHostUnreachable(true);
+    } else if (isOfflineError(e)) {
+      setError(tr('noInternet'));
     } else {
-      await setWindUnit(value);
+      setError(e?.message || tr('weatherFetchFailed'));
     }
-    hideUnitPicker();
   };
-  const openLanguagePicker = () => {
-    languagePickerAnim.setValue(0);
-    setLanguagePickerVisible(true);
-  };
-  const closeLanguagePicker = () => {
-    Animated.timing(languagePickerAnim, {
-      toValue: 0,
-      duration: 180,
-      easing: Easing.in(Easing.quad),
-      useNativeDriver: true,
-    }).start(({ finished }) => {
-      if (finished) setLanguagePickerVisible(false);
-    });
-  };
-  const selectLanguage = async (value) => {
-    await changeLanguage(value);
-    closeLanguagePicker();
-  };
-  const openGitHub = async () => {
-    try {
-      await Linking.openURL(GITHUB_URL);
-    } catch (e) {}
-  };
-  const geocode = async (query) => {
-    // 1. Current app language -> 2. English -> 3. transliterated Latin
-    // variants (shared helper, see geocoding.js). Only then "not found".
-    // Provider layer: OM search (transliteration included), Nominatim
-    // when OM yields nothing (same hit contract, region checks stay).
+
+  const geocode = async (query, fetchJson) => {
     const hit = await searchCity(query, i18n.language || 'ru', fetchJson);
     if (!hit) {
       throw new Error(tr('cityNotFound'));
@@ -607,11 +484,8 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
     }
     return hit;
   };
-  // Name resolution with real fallbacks (native geocoder -> Open-Meteo
-  // -> BigDataCloud, see geocoding.js). Open-Meteo alone returns
-  // {error:"Not Found"} for rural coords (e.g. 56.21, 37.55), which used
-  // to leave the header stuck on "Current location".
-  const reverseGeocode = async (lat, lon) => {
+
+  const reverseGeocode = async (lat, lon, fetchJson) => {
     const resolved = await resolvePlaceName(lat, lon, i18n.language, fetchJson);
     return {
       name: resolved?.name || tr('currentLocation'),
@@ -620,28 +494,68 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
       longitude: lon,
     };
   };
-  // Canonical forecast via the provider layer: Open-Meteo full shape,
-  // automatic 7Timer fallback with the SAME shape when OM is down or
-  // blocked. Result carries `source` ('open-meteo' | '7timer').
-  const fetchWeather = async (lat, lon) => {
+
+  // Canonical forecast via the provider layer: Open-Meteo full shape (with
+  // real feels-like, humidity, pressure, wind direction & precipitation
+  // probability in the SAME single request), automatic 7Timer fallback.
+  const fetchWeather = async (lat, lon, fetchJson) => {
     return fetchForecast(
       lat,
       lon,
       fetchJson,
-      `${BASE_URL}?latitude=${lat}&longitude=${lon}&current_weather=true&hourly=temperature_2m,weathercode&daily=weathercode,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=auto`
+      `${BASE_URL}?latitude=${lat}&longitude=${lon}&current_weather=true&current=apparent_temperature,relative_humidity_2m,surface_pressure,precipitation_probability,wind_direction_10m&hourly=temperature_2m,weathercode,precipitation_probability&daily=weathercode,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max&timezone=auto`,
     );
   };
+
+  // Load weather for an already-known place (from CityList / Phenomena)
+  // without redundant geocoding.
+  const loadKnownPlace = async (place, silent = false) => {
+    const { seq, signal } = beginRequest();
+    const fetchJson = makeFetchJson(signal);
+    if (!silent) setLoading(true);
+    setError(null);
+    setHostUnreachable(false);
+    lastRequest.current = { type: 'coords', lat: place.latitude, lon: place.longitude, query: place.name };
+    try {
+      const data = await fetchWeather(place.latitude, place.longitude, fetchJson);
+      if (seq !== requestSeqRef.current) return;
+      const savedAt = Date.now();
+      const snapshot = { place, data, savedAt };
+      weatherRef.current = snapshot;
+      setWeather(snapshot);
+      setIsStale(false);
+      await saveCachedWeather({ place, data, query: place.name, savedAt });
+      if (rememberRef.current && place.name) {
+        await saveLastCity(place.name);
+      }
+      setCity('');
+    } catch (e) {
+      if (seq !== requestSeqRef.current || isExternalAbortError(e)) return;
+      applyFetchError(e);
+      if (!silent && !weatherRef.current) {
+        setWeather(null);
+      }
+    } finally {
+      if (seq === requestSeqRef.current) setLoading(false);
+    }
+  };
+
   // Scenario A: refresh by saved coordinates — pure Open-Meteo fetch,
   // never touches Location.*. Scenario B (geolocation) lives ONLY in
   // detectMyLocation(), called from the "my location" button / first launch.
-  const loadByCoords = async (lat, lon, silent = false) => {
+  const loadByCoords = async (lat, lon, silent = false, warningMsg = null) => {
+    const { seq, signal } = beginRequest();
+    const fetchJson = makeFetchJson(signal);
     if (!silent) setLoading(true);
-    setError(null);
-    // Record intent BEFORE the attempt so Retry repeats this action
-    // even if it fails (previously only set on success, leaving a stale request).
+    setError(warningMsg);
+    setHostUnreachable(false);
     lastRequest.current = { type: 'coords', lat, lon };
     try {
-      const [place, data] = await Promise.all([reverseGeocode(lat, lon), fetchWeather(lat, lon)]);
+      const [place, data] = await Promise.all([
+        reverseGeocode(lat, lon, fetchJson),
+        fetchWeather(lat, lon, fetchJson),
+      ]);
+      if (seq !== requestSeqRef.current) return;
       const savedAt = Date.now();
       const snapshot = { place, data, savedAt };
       weatherRef.current = snapshot;
@@ -653,70 +567,62 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
       }
       setCity('');
     } catch (e) {
-      if (isOfflineError(e)) {
-        setError(tr('noInternet'));
-      } else if (e.kind === 'network') {
-        setError(null);
-        setHostUnreachable(true);
-      } else {
-        setError(e.message || tr('weatherFetchFailed'));
-      }
+      if (seq !== requestSeqRef.current || isExternalAbortError(e)) return;
+      applyFetchError(e);
       if (!silent) {
         weatherRef.current = null;
         setWeather(null);
       }
     } finally {
-      setLoading(false);
+      if (seq === requestSeqRef.current) setLoading(false);
     }
   };
-  // No NetInfo gate here (or anywhere): NetInfo reports the VPN tunnel
-  // state, not real reachability — with a half-dead tunnel it says
-  // "offline" while the browser fetches fine. Always attempt; the catch
-  // below classifies the real error.
+
   const detectMyLocation = async () => {
-     setLocating(true);
-     setError(null);
-     try {
-       let { status } = await Location.getForegroundPermissionsAsync();
-       if (status !== 'granted') {
-         const permission = await Location.requestForegroundPermissionsAsync();
-         status = permission.status;
-       }
-       if (status !== 'granted') {
-         setPermissionModalVisible(true);
-         return;
-       }
-       const position = await Location.getCurrentPositionAsync({
-         accuracy: Location.Accuracy.Balanced,
-       });
-       const { latitude, longitude, accuracy } = position.coords;
-       if (accuracy && accuracy > 1000) {
-         setError("Геолокация приблизительная. Для точного прогноза включите 'Точное местоположение' в настройках.");
-       }
-       await loadByCoords(latitude, longitude);
-     } catch (e) {
-       setError(tr('locationFailed'));
-     } finally {
-       setLocating(false);
-     }
-   };
+    setLocating(true);
+    setError(null);
+    setHostUnreachable(false);
+    try {
+      let { status } = await Location.getForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        const permission = await Location.requestForegroundPermissionsAsync();
+        status = permission.status;
+      }
+      if (status !== 'granted') {
+        setPermissionModalVisible(true);
+        return;
+      }
+      const position = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+      const { latitude, longitude, accuracy } = position.coords;
+      const approxWarning = accuracy && accuracy > 1000 ? tr('approximateLocation') : null;
+      await loadByCoords(latitude, longitude, false, approxWarning);
+    } catch (e) {
+      setError(tr('locationFailed'));
+    } finally {
+      setLocating(false);
+    }
+  };
+
   const doSearch = async (query, silent = false) => {
+    const { seq, signal } = beginRequest();
+    const fetchJson = makeFetchJson(signal);
     if (!silent) setLoading(true);
     setError(null);
-    // Record intent BEFORE the attempt so Retry repeats this exact search
-    // even when geocoding fails with "city not found".
+    setHostUnreachable(false);
     lastRequest.current = { type: 'city', query };
     try {
-      const place = await geocode(query);
-      const data = await fetchWeather(place.latitude, place.longitude);
+      const place = await geocode(query, fetchJson);
+      if (seq !== requestSeqRef.current) return;
+      const data = await fetchWeather(place.latitude, place.longitude, fetchJson);
+      if (seq !== requestSeqRef.current) return;
       const savedAt = Date.now();
       const snapshot = { place, data, savedAt };
       weatherRef.current = snapshot;
       setWeather(snapshot);
       setIsStale(false);
       await saveCachedWeather({ place, data, query, savedAt });
-      // Upgrade intent to coords so the next refresh uses saved
-      // coordinates directly (no re-geocode, never geolocation).
       if (typeof place.latitude === 'number' && typeof place.longitude === 'number') {
         lastRequest.current = { type: 'coords', lat: place.latitude, lon: place.longitude, query };
       }
@@ -725,28 +631,34 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
       }
       setCity('');
     } catch (e) {
-      if (isOfflineError(e)) {
-        setError(tr('noInternet'));
-      } else if (e.kind === 'network') {
-        setError(null);
-        setHostUnreachable(true);
-      } else {
-        setError(e.message || tr('weatherFetchFailed'));
-      }
+      if (seq !== requestSeqRef.current || isExternalAbortError(e)) return;
+      applyFetchError(e);
       if (!silent) {
         weatherRef.current = null;
         setWeather(null);
       }
     } finally {
-      setLoading(false);
+      if (seq === requestSeqRef.current) setLoading(false);
     }
   };
+
   useEffect(() => {
-    if (cityParam && appliedCityParam.current !== cityParam) {
-      appliedCityParam.current = cityParam;
+    if (!cityParam) return;
+    const navKey = `${cityParam}|${latParam ?? ''}|${lonParam ?? ''}|${navTsParam ?? ''}`;
+    if (appliedCityParam.current === navKey) return;
+    appliedCityParam.current = navKey;
+    if (typeof latParam === 'number' && typeof lonParam === 'number' && Number.isFinite(latParam) && Number.isFinite(lonParam)) {
+      loadKnownPlace({
+        name: cityParam,
+        country: countryParam || '',
+        latitude: latParam,
+        longitude: lonParam,
+      });
+    } else {
       doSearch(cityParam);
     }
-  }, [cityParam]);
+  }, [cityParam, latParam, lonParam, countryParam, navTsParam]);
+
   const search = () => {
     const query = city.trim();
     if (!query) {
@@ -756,42 +668,37 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
     Keyboard.dismiss();
     doSearch(query);
   };
+
   // Swipe/Retry refresh: fetch ONLY fresh weather data for the currently
-  // displayed place and keep its name/country untouched. This is what
-  // prevents "Дмитров" from turning into "Текущее местоположение" after
-  // a swipe — unlike loadByCoords(), it never runs reverseGeocode().
+  // displayed place and keep its name/country untouched.
   const refreshCurrentWeather = async (silent = false) => {
     const cur = weatherRef.current;
     if (!cur || !cur.place || typeof cur.place.latitude !== 'number' || typeof cur.place.longitude !== 'number') {
       return false;
     }
+    const { seq, signal } = beginRequest();
+    const fetchJson = makeFetchJson(signal);
     if (!silent) setLoading(true);
     setError(null);
+    setHostUnreachable(false);
     try {
-      const data = await fetchWeather(cur.place.latitude, cur.place.longitude);
+      const data = await fetchWeather(cur.place.latitude, cur.place.longitude, fetchJson);
+      if (seq !== requestSeqRef.current) return false;
       const savedAt = Date.now();
       const snapshot = { place: cur.place, data, savedAt };
       weatherRef.current = snapshot;
       setWeather(snapshot);
       setIsStale(false);
       const q = lastRequest.current?.query ?? cur.place.name;
-      if (typeof cur.place.latitude === 'number' && typeof cur.place.longitude === 'number') {
-        lastRequest.current = { type: 'coords', lat: cur.place.latitude, lon: cur.place.longitude, query: q ?? null };
-      }
+      lastRequest.current = { type: 'coords', lat: cur.place.latitude, lon: cur.place.longitude, query: q ?? null };
       await saveCachedWeather({ place: cur.place, data, query: q, savedAt });
       return true;
     } catch (e) {
-      if (isOfflineError(e)) {
-        setError(tr('noInternet'));
-      } else if (e.kind === 'network') {
-        setError(null);
-        setHostUnreachable(true);
-      } else {
-        setError(e.message || tr('weatherFetchFailed'));
-      }
+      if (seq !== requestSeqRef.current || isExternalAbortError(e)) return false;
+      applyFetchError(e);
       return false;
     } finally {
-      if (!silent) setLoading(false);
+      if (!silent && seq === requestSeqRef.current) setLoading(false);
     }
   };
   // Shared refresh target: Scenario A only (saved city coords).
@@ -842,11 +749,12 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
     if (retrying) return;
     setRetrying(true);
     try {
-      const state = await NetInfo.fetch();
-      updateConnection(!!state.isConnected);
+      const state = await NetInfo.fetch().catch(() => ({ isConnected: true }));
+      setIsConnected(!!state.isConnected);
       // No gate: a lying "offline" must not disable Retry — the attempt
       // below proves reachability one way or the other.
       setHostUnreachable(false);
+      setDismissedMsg(null);
       // Primary path: keep the current header, only reload the data.
       const hadPlace = !!weatherRef.current?.place;
       if (await refreshCurrentWeather(false)) return;
@@ -949,11 +857,10 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
   }, [isSplashVisible, themeLoaded, loading, locating, weather]);
   useLayoutEffect(() => {
     const hideTabs =
-      settingsOpen ||
       isSplashVisible ||
       !themeLoaded ||
       ((loading || locating) && weather === null);
-     navigation.setOptions({
+    navigation.setOptions({
       tabBarStyle: {
         backgroundColor: theme.background,
         borderTopColor: theme.border,
@@ -962,9 +869,30 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
         display: hideTabs ? 'none' : 'flex',
       },
       tabBarActiveTintColor: theme.mode === 'light' ? '#3b82f6' : '#fbbf24',
-      tabBarInactiveTintColor: theme.mode === 'light' ? '#94a3b8' : '#94a3b8',
+      tabBarInactiveTintColor: '#94a3b8',
     });
-  }, [settingsOpen, isSplashVisible, themeLoaded, loading, locating, weather, theme, navigation]);
+  }, [isSplashVisible, themeLoaded, loading, locating, weather, theme, navigation]);
+
+  const hourlyTimeline = useMemo(
+    () => getHourlyTimeline(weather?.data),
+    [weather?.data],
+  );
+  const weeklyBounds = useMemo(
+    () => computeWeeklyTempBounds(weather?.data?.daily),
+    [weather?.data?.daily],
+  );
+  const currentExtras = useMemo(
+    () => extractCurrentExtras(weather?.data),
+    [weather?.data],
+  );
+  const pressureDisplay = useMemo(() => {
+    if (currentExtras.pressureHpa === null) return null;
+    if (i18n.language === 'en') {
+      return `${Math.round(currentExtras.pressureHpa)} ${tr('pressureUnitHpa')}`;
+    }
+    const mm = hpaToMmHg(currentExtras.pressureHpa);
+    return mm !== null ? `${mm} ${tr('pressureUnitMmHg')}` : null;
+  }, [currentExtras.pressureHpa, tr, i18n.language]);
   const currentIsNight =
     weather &&
     weather.data &&
@@ -1213,7 +1141,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
               ) : null}
               {cityTime && <Text style={styles.cityTime}>{tr('localTime')} {cityTime}</Text>}
               <View style={styles.bigIconWrap}>
-                {currentType === 'clear' ? (
+                {currentType === 'clear' && !currentIsNight ? (
                   <SunAnimation size={100} />
                 ) : currentType === 'fog' ? (
                   <FogAnimation size={100} />
@@ -1223,29 +1151,52 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
               </View>
               <CrossfadeValue
                 style={styles.temperature}
-                value={formatTemp(weather.data.current_weather.temperature, tempUnit)}
+                value={formatTemp(weather.data.current_weather?.temperature, tempUnit)}
               />
               <CrossfadeValue
                 style={styles.condition}
-                value={conditionFor(weather.data.current_weather.weathercode)}
+                value={conditionFor(weather.data.current_weather?.weathercode)}
               />
-              <View style={styles.detailRow}>
+              {currentExtras.feelsLike !== null && (
+                <Text style={styles.feelsLikeText}>
+                  {tr('feelsLike', { temp: formatTemp(currentExtras.feelsLike, tempUnit) })}
+                </Text>
+              )}
+              <View style={styles.detailGrid}>
                 <View style={styles.detailCard}>
-                   <CrossfadeValue
-                     style={styles.detailValue}
-                     value={formatWind(weather.data.current_weather.windspeed, windUnit)}
-                   />
-                   <Text style={styles.detailLabel}>{tr('wind')}</Text>
+                  <CrossfadeValue
+                    style={styles.detailValue}
+                    value={formatWind(weather.data.current_weather?.windspeed, windUnit, currentExtras.windDirection)}
+                  />
+                  <Text style={styles.detailLabel}>{tr('wind')}</Text>
                 </View>
                 <View style={styles.detailCard}>
                   <CrossfadeValue
                     style={styles.detailValue}
-                    value={weather.data.current_weather.is_day ? tr('day') : tr('night')}
+                    value={weather.data.current_weather?.is_day ? tr('day') : tr('night')}
                   />
-                   <Text style={styles.detailLabel}>{tr('timeOfDay')}</Text>
+                  <Text style={styles.detailLabel}>{tr('timeOfDay')}</Text>
                 </View>
-               </View>
-              {weather.data && (
+                {currentExtras.humidity !== null && (
+                  <View style={styles.detailCard}>
+                    <CrossfadeValue
+                      style={styles.detailValue}
+                      value={`${Math.round(currentExtras.humidity)}%`}
+                    />
+                    <Text style={styles.detailLabel}>{tr('humidity')}</Text>
+                  </View>
+                )}
+                {pressureDisplay !== null && (
+                  <View style={styles.detailCard}>
+                    <CrossfadeValue
+                      style={styles.detailValue}
+                      value={pressureDisplay}
+                    />
+                    <Text style={styles.detailLabel}>{tr('pressure')}</Text>
+                  </View>
+                )}
+              </View>
+              {hourlyTimeline.length > 0 && (
                 <>
                   <Text style={styles.sectionTitle}>{tr('hourlyForecast')}</Text>
                   <ScrollView
@@ -1253,7 +1204,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                     showsHorizontalScrollIndicator={false}
                     contentContainerStyle={styles.hourlyRow}
                   >
-                    {getHourlyTimeline(weather.data).map((item, idx) => {
+                    {hourlyTimeline.map((item, idx) => {
                       if (item.type === 'sunrise' || item.type === 'sunset') {
                         const isSunrise = item.type === 'sunrise';
                         return (
@@ -1269,13 +1220,18 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                       return (
                         <View key={`${item.type}-${item.time}`} style={styles.hourlyCard}>
                           <Text style={styles.hourlyTemp} numberOfLines={1}>
-                            {item.temp === null || item.temp === undefined ? '–' : formatTemp(item.temp, tempUnit)}
+                            {formatTemp(item.temp, tempUnit)}
                           </Text>
                           <WeatherIcon
                             type={weathercodeToType(item.code)}
                             isNight={isNightHour(item.time)}
                             size={26}
                           />
+                          {typeof item.precipProb === 'number' && item.precipProb >= 20 ? (
+                            <Text style={styles.hourlyPrecip} numberOfLines={1}>
+                              {item.precipProb}%
+                            </Text>
+                          ) : null}
                           <Text style={styles.hourlyTime}>{idx === 0 ? tr('now') : String(item.time).slice(11, 16)}</Text>
                         </View>
                       );
@@ -1283,23 +1239,43 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                   </ScrollView>
                 </>
               )}
-                <Text style={styles.sectionTitle}>{tr('weeklyForecast')}</Text>
-               {weather.data.daily && weather.data.daily.time && weather.data.daily.time.map((day, i) => (
-                <View key={day} style={styles.forecastRow}>
-                  <Text style={styles.forecastDay}>{formatDay(day)}</Text>
-                  <View style={styles.forecastIconCell}>
-                    <WeatherIcon
-                      type={weathercodeToType(weather.data.daily.weathercode[i])}
-                      isNight={false}
-                      size={26}
-                    />
+              <Text style={styles.sectionTitle}>{tr('weeklyForecast')}</Text>
+              {weather.data.daily && Array.isArray(weather.data.daily.time) && weather.data.daily.time.map((day, i) => {
+                const dayMin = weather.data.daily.temperature_2m_min?.[i];
+                const dayMax = weather.data.daily.temperature_2m_max?.[i];
+                const dayProb = weather.data.daily.precipitation_probability_max?.[i];
+                const range = weeklyBounds
+                  ? computeDayRangeFractions(dayMin, dayMax, weeklyBounds.min, weeklyBounds.max)
+                  : null;
+                return (
+                  <View key={day} style={styles.forecastRow}>
+                    <Text style={styles.forecastDay} numberOfLines={1}>{formatDay(day)}</Text>
+                    <View style={styles.forecastIconCell}>
+                      <WeatherIcon
+                        type={weathercodeToType(weather.data.daily.weathercode?.[i])}
+                        isNight={false}
+                        size={26}
+                      />
+                      {typeof dayProb === 'number' && dayProb >= 20 ? (
+                        <Text style={styles.forecastPrecip}>{Math.round(dayProb)}%</Text>
+                      ) : null}
+                    </View>
+                    {range && (
+                      <View style={styles.rangeBarTrack}>
+                        <View
+                          style={[
+                            styles.rangeBarFill,
+                            { left: `${range.leftPct}%`, width: `${range.widthPct}%` },
+                          ]}
+                        />
+                      </View>
+                    )}
+                    <Text style={styles.forecastTemp} numberOfLines={1}>
+                      {formatTemp(dayMin, tempUnit)} / {formatTemp(dayMax, tempUnit)}
+                    </Text>
                   </View>
-                  <Text style={styles.forecastTemp} numberOfLines={1}>
-                    {formatTemp(weather.data.daily.temperature_2m_min[i], tempUnit)} /{' '}
-                    {formatTemp(weather.data.daily.temperature_2m_max[i], tempUnit)}
-                  </Text>
-                </View>
-              ))}
+                );
+              })}
             </HeroReveal>
           )}
            {!loading && !locating && !weather && (
@@ -1326,312 +1302,6 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
             </Animated.View>
             <Text style={styles.splashText}>{tr('splashText')}</Text>
           </Animated.View>
-        )}
-        {settingsOpen && (
-          <View style={styles.settingsLayer} pointerEvents="box-none">
-            <Animated.View style={[styles.settingsDim, { opacity: settingsOverlayOpacity }]} />
-            <Animated.View
-              style={[styles.settingsScreen, { transform: [{ translateX: settingsScreenX }] }]}
-            >
-              <SafeAreaView style={styles.settingsSafe}>
-                <View style={styles.settingsHeader}>
-                  <TouchableOpacity
-                    style={styles.settingsBackButton}
-                    onPress={closeSettings}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={styles.settingsBackIcon}>←</Text>
-                  </TouchableOpacity>
-                   <Text style={styles.settingsHeaderTitle}>{tr('about')}</Text>
-                </View>
-                <ScrollView
-                  style={styles.settingsBody}
-                  contentContainerStyle={styles.settingsBodyContent}
-                >
-                  <View style={styles.settingsHero}>
-                     <Image source={APP_ICON_SOURCE} style={styles.heroAppIcon} resizeMode="contain" />
-                     <Text style={styles.heroTitle}>{tr('weather')}</Text>
-                     <Text style={styles.heroAuthor}>{tr('byAuthor')}</Text>
-                     <Text style={styles.heroVersion}>{tr('version', { version: APP_VERSION })}</Text>
-                  </View>
-                    <Text style={styles.settingsSectionTitle}>{tr('settings')}</Text>
-                    <View style={styles.cardStack}>
-                       <View style={styles.aboutCard}>
-                         <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                           <Text style={styles.aboutCardTitle}>{tr('rememberCity')}</Text>
-                           <Text style={styles.aboutCardDesc}>
-                             {tr('rememberCityDesc')}
-                           </Text>
-                         </View>
-                         <Switch
-                           style={{ flexShrink: 0, alignSelf: 'center', marginLeft: 10 }}
-                           value={rememberCity}
-                           onValueChange={toggleRemember}
-                           trackColor={{ false: switchTrackOff, true: theme.accent2 }}
-                           thumbColor="#ffffff"
-                           ios_backgroundColor={switchTrackOff}
-                         />
-                       </View>
-                    </View>
-                    <Text style={styles.settingsSectionTitle}>{tr('interface')}</Text>
-                   <View style={styles.cardStack}>
-                      <TouchableOpacity
-                        style={styles.aboutCard}
-                        onPress={openThemePicker}
-                        activeOpacity={0.6}
-                      >
-                        <View style={styles.interfaceIconWrap}>
-                          <Text style={styles.interfaceIconEmoji}>🎨</Text>
-                        </View>
-                        <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                          <Text style={styles.aboutCardTitle}>{tr('appTheme')}</Text>
-                          <Text style={styles.aboutCardDesc}>{currentThemeLabel}</Text>
-                        </View>
-                        <Text style={styles.settingsChevron}>›</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.aboutCard}
-                        onPress={openLanguagePicker}
-                        activeOpacity={0.6}
-                      >
-                        <View style={styles.interfaceIconWrap}>
-                          <Text style={styles.interfaceIconEmoji}>🌐</Text>
-                        </View>
-                        <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                          <Text style={styles.aboutCardTitle}>{tr('language')}</Text>
-                          <Text style={styles.aboutCardDesc}>
-                            {i18n.language === 'ru' ? tr('russian') : tr('english')}
-                          </Text>
-                        </View>
-                        <Text style={styles.settingsChevron}>›</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <Text style={styles.settingsSectionTitle}>{tr('units')}</Text>
-                    <View style={styles.cardStack}>
-                      <TouchableOpacity
-                        style={styles.aboutCard}
-                        onPress={() => showUnitPicker('temp')}
-                        activeOpacity={0.6}
-                      >
-                        <View style={styles.interfaceIconWrap}>
-                          <Text style={styles.interfaceIconEmoji}>🌡️</Text>
-                        </View>
-                        <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                          <Text style={styles.aboutCardTitle}>{tr('temperature')}</Text>
-                          <Text style={styles.aboutCardDesc}>
-                            {tr(TEMP_UNIT_OPTIONS.find((o) => o.value === tempUnit)?.labelKey ?? 'tempUnits.C.label')}
-                          </Text>
-                        </View>
-                        <Text style={styles.settingsChevron}>›</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.aboutCard}
-                        onPress={() => showUnitPicker('wind')}
-                        activeOpacity={0.6}
-                      >
-                        <View style={styles.interfaceIconWrap}>
-                          <Text style={styles.interfaceIconEmoji}>💨</Text>
-                        </View>
-                        <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                          <Text style={styles.aboutCardTitle}>{tr('windSpeed')}</Text>
-                          <Text style={styles.aboutCardDesc}>
-                            {tr(WIND_UNIT_OPTIONS.find((o) => o.value === windUnit)?.labelKey ?? 'windUnits.kmh.label')}
-                          </Text>
-                        </View>
-                        <Text style={styles.settingsChevron}>›</Text>
-                      </TouchableOpacity>
-                    </View>
-                   <Text style={styles.settingsSectionTitle}>{tr('aboutProject')}</Text>
-                   <View style={styles.cardStack}>
-                     <TouchableOpacity
-                       style={styles.aboutCard}
-                       onPress={openGitHub}
-                       activeOpacity={0.6}
-                      >
-                        <View style={styles.githubIconWrap}>
-                          <GithubIcon size={22} color={theme.text} />
-                        </View>
-                        <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                          <Text style={styles.aboutCardTitle}>{tr('sourceCode')}</Text>
-                          <Text style={styles.aboutCardDesc}>
-                            {tr('githubDesc')}
-                          </Text>
-                        </View>
-                        <Text style={styles.settingsChevron}>›</Text>
-                      </TouchableOpacity>
-                  </View>
-                </ScrollView>
-                {themePickerVisible && (
-                  <View style={styles.pickerLayer} pointerEvents="box-none">
-                    <Animated.View style={[styles.pickerBackdrop, { opacity: pickerAnim }]}>
-                      <TouchableOpacity
-                        style={StyleSheet.absoluteFill}
-                        activeOpacity={1}
-                        onPress={closeThemePicker}
-                      />
-                    </Animated.View>
-                    <Animated.View
-                      style={[
-                        styles.pickerCard,
-                        {
-                          opacity: pickerAnim,
-                          transform: [
-                            {
-                              scale: pickerAnim.interpolate({
-                                inputRange: [0, 1],
-                                outputRange: [0.92, 1],
-                              }),
-                            },
-                          ],
-                        },
-                      ]}
-                    >
-                      <Text style={styles.pickerTitle}>{tr('appTheme')}</Text>
-                      {THEME_MODES.map((m) => {
-                        const selected = m.value === themeMode;
-                        return (
-                          <TouchableOpacity
-                            key={m.value}
-                            style={styles.pickerOption}
-                            onPress={() => selectThemeMode(m.value)}
-                            activeOpacity={0.6}
-                          >
-                            <View
-                              style={[styles.radioOuter, selected && { borderColor: theme.accent }]}
-                            >
-                              {selected && (
-                                <View
-                                  style={[styles.radioInner, { backgroundColor: theme.accent }]}
-                                />
-                              )}
-                            </View>
-                            <View style={styles.pickerOptionTextWrap}>
-                              <Text style={styles.pickerOptionLabel}>{tr(m.labelKey)}</Text>
-                              <Text style={styles.pickerOptionDesc}>{tr(m.descKey)}</Text>
-                            </View>
-                          </TouchableOpacity>
-                        );
-                       })}
-                     </Animated.View>
-                   </View>
-                 )}
-                 {unitPickerVisible && (
-                   <View style={styles.pickerLayer} pointerEvents="box-none">
-                     <Animated.View style={[styles.pickerBackdrop, { opacity: tempPickerAnim }]}>
-                       <TouchableOpacity
-                         style={StyleSheet.absoluteFill}
-                         activeOpacity={1}
-                         onPress={hideUnitPicker}
-                       />
-                     </Animated.View>
-                     <Animated.View
-                       style={[
-                         styles.pickerCard,
-                         {
-                           opacity: tempPickerAnim,
-                           transform: [
-                             {
-                               scale: tempPickerAnim.interpolate({
-                                 inputRange: [0, 1],
-                                 outputRange: [0.92, 1],
-                               }),
-                             },
-                           ],
-                         },
-                       ]}
-                     >
-                        <Text style={styles.pickerTitle}>
-                          {unitPickerMode === 'temp' ? tr('temperature') : tr('windSpeed')}
-                        </Text>
-                        {(unitPickerMode === 'temp' ? TEMP_UNIT_OPTIONS : WIND_UNIT_OPTIONS).map(
-                          (o) => {
-                            const selected =
-                              (unitPickerMode === 'temp'
-                                ? o.value === tempUnit
-                                : o.value === windUnit) || false;
-                            return (
-                              <TouchableOpacity
-                                key={o.value}
-                                style={styles.pickerOption}
-                                onPress={() => onSelectUnit(o.value)}
-                                activeOpacity={0.6}
-                              >
-                                <View
-                                  style={[styles.radioOuter, selected && { borderColor: theme.accent }]}
-                                >
-                                  {selected && (
-                                    <View
-                                      style={[styles.radioInner, { backgroundColor: theme.accent }]}
-                                    />
-                                  )}
-                                </View>
-                                <View style={styles.pickerOptionTextWrap}>
-                                  <Text style={styles.pickerOptionLabel}>{tr(o.labelKey)}</Text>
-                                  <Text style={styles.pickerOptionDesc}>{tr(o.descKey)}</Text>
-                                </View>
-                              </TouchableOpacity>
-                            );
-                          },
-                        )}
-                     </Animated.View>
-                   </View>
-                 )}
-                   {languagePickerVisible && (
-                     <View style={styles.pickerLayer} pointerEvents="box-none">
-                       <Animated.View style={[styles.pickerBackdrop, { opacity: languagePickerAnim }]}>
-                         <TouchableOpacity
-                           style={StyleSheet.absoluteFill}
-                           activeOpacity={1}
-                           onPress={closeLanguagePicker}
-                         />
-                       </Animated.View>
-                       <Animated.View
-                         style={[
-                           styles.pickerCard,
-                           {
-                             opacity: languagePickerAnim,
-                             transform: [
-                               {
-                                 scale: languagePickerAnim.interpolate({
-                                   inputRange: [0, 1],
-                                   outputRange: [0.92, 1],
-                                 }),
-                               },
-                             ],
-                           },
-                         ]}
-                       >
-                         <Text style={styles.pickerTitle}>{tr('language')}</Text>
-                         {LANGUAGE_OPTIONS.map((lang) => {
-                           const selected = lang.value === i18n.language;
-                           return (
-                             <TouchableOpacity
-                               key={lang.value}
-                               style={styles.pickerOption}
-                               onPress={() => selectLanguage(lang.value)}
-                               activeOpacity={0.6}
-                             >
-                               <View
-                                 style={[styles.radioOuter, selected && { borderColor: theme.accent }]}
-                               >
-                                 {selected && (
-                                   <View
-                                     style={[styles.radioInner, { backgroundColor: theme.accent }]}
-                                   />
-                                 )}
-                               </View>
-                               <View style={styles.pickerOptionTextWrap}>
-                                 <Text style={styles.pickerOptionLabel}>{tr(lang.labelKey)}</Text>
-                               </View>
-                             </TouchableOpacity>
-                           );
-                         })}
-                       </Animated.View>
-                     </View>
-                   )}
-                 </SafeAreaView>
-            </Animated.View>
-          </View>
         )}
         <PermissionModal
           visible={permissionModalVisible}
@@ -1725,21 +1395,18 @@ const preloadStyles = StyleSheet.create({
   fill: { flex: 1 },
 });
 
-const buildStyles = (theme, fs, insets) =>
-  StyleSheet.create({
+const buildStyles = (theme, fs, insets) => {
+  const isLight = theme.mode === 'light';
+  return StyleSheet.create({
     safe: { flex: 1, backgroundColor: theme.background },
     splash: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.background, alignItems: 'center', justifyContent: 'center' },
     splashIconWrap: { marginBottom: fs.spacing },
     splashText: { color: theme.textSecondary, fontSize: fs.small },
-    title: { fontSize: fs.base * 2, fontWeight: '700', color: theme.text, textAlign: 'center', marginTop: 0, marginLeft: 0 },
     container: { flex: 1, position: 'relative', paddingHorizontal: fs.spacing },
-    titleRow: { display: 'none' },
-    gearButton: { width: fs.spacing * 2.75, height: fs.spacing * 3, alignItems: 'center', justifyContent: 'center', marginLeft: fs.spacing * 0.25 },
-    gearIcon: { fontSize: fs.iconSize },
-    menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: 60, paddingRight: 16 },
+    menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: insets.top + 52, paddingRight: 16 },
     dropdownMenu: { minWidth: 220, borderRadius: 16, borderWidth: 1, paddingVertical: 6, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
     menuItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 18 },
-    menuItemText: { fontSize: 16, fontWeight: '600' },
+    menuItemText: { fontSize: fs.base, fontWeight: '600' },
     menuDivider: { height: 1, width: '100%', marginVertical: 2 },
     searchBarContainer: {
       flexDirection: 'row',
@@ -1754,7 +1421,7 @@ const buildStyles = (theme, fs, insets) =>
       borderColor: theme.border || 'rgba(255,255,255,0.08)',
       shadowColor: '#000',
       shadowOffset: { width: 0, height: 4 },
-      shadowOpacity: 0.15,
+      shadowOpacity: isLight ? 0.08 : 0.15,
       shadowRadius: 8,
       elevation: 4,
     },
@@ -1772,7 +1439,7 @@ const buildStyles = (theme, fs, insets) =>
     animatedPlaceholder: {
       position: 'absolute',
       left: fs.spacing * 0.5,
-      color: theme.textMuted || 'rgba(255,255,255,0.4)',
+      color: theme.textMuted,
       fontSize: fs.base,
     },
     searchInput: {
@@ -1789,21 +1456,45 @@ const buildStyles = (theme, fs, insets) =>
       alignItems: 'center',
       marginLeft: 4,
     },
-    searchRow: { flexDirection: 'row', alignItems: 'center', marginBottom: fs.spacing * 0.625, paddingTop: fs.spacing * 0.35 },
-    input: { flex: 1, height: fs.spacing * 3, backgroundColor: theme.surface, borderRadius: 12, paddingHorizontal: fs.spacing * 0.875, color: theme.text, fontSize: fs.base, marginRight: fs.spacing * 0.5 },
-    button: { height: fs.spacing * 3, paddingHorizontal: fs.spacing * 1.15, backgroundColor: theme.accent, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-    locButton: { backgroundColor: theme.accent2, marginBottom: fs.spacing },
-    buttonDisabled: { opacity: 0.5 },
-    buttonText: { color: theme.onAccent, fontSize: fs.base, fontWeight: '600' },
-    infoBanner: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff9c4', borderRadius: 10, paddingVertical: fs.spacing * 0.625, paddingHorizontal: fs.spacing * 0.75, marginBottom: fs.spacing },
-    infoBannerVpn: { backgroundColor: '#ffe0b2' },
-    infoBannerOffline: { backgroundColor: '#fdecea' },
-    infoBannerText: { flex: 1, color: '#4a3000', fontSize: fs.small, fontWeight: '600', marginRight: fs.spacing * 0.5 },
-    infoBannerTextOffline: { color: '#7a1c1c' },
-    bannerButton: { backgroundColor: '#4a3000', borderRadius: 8, paddingVertical: fs.spacing * 0.375, paddingHorizontal: fs.spacing * 0.625, marginRight: fs.spacing * 0.5 },
-    bannerButtonText: { color: '#fff3cd', fontSize: fs.small, fontWeight: '700' },
+    infoBanner: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: isLight ? '#fff8e1' : 'rgba(255, 193, 7, 0.14)',
+      borderWidth: 1,
+      borderColor: isLight ? '#ffe082' : 'rgba(255, 193, 7, 0.35)',
+      borderRadius: 12,
+      paddingVertical: fs.spacing * 0.625,
+      paddingHorizontal: fs.spacing * 0.75,
+      marginBottom: fs.spacing * 0.75,
+    },
+    infoBannerVpn: {
+      backgroundColor: isLight ? '#fff3e0' : 'rgba(255, 159, 10, 0.15)',
+      borderColor: isLight ? '#ffcc80' : 'rgba(255, 159, 10, 0.38)',
+    },
+    infoBannerOffline: {
+      backgroundColor: isLight ? '#fdecea' : 'rgba(255, 69, 58, 0.15)',
+      borderColor: isLight ? '#f5c2c0' : 'rgba(255, 69, 58, 0.38)',
+    },
+    infoBannerText: {
+      flex: 1,
+      color: isLight ? '#5c3c00' : '#ffe082',
+      fontSize: fs.small,
+      fontWeight: '600',
+      marginRight: fs.spacing * 0.5,
+    },
+    infoBannerTextOffline: {
+      color: isLight ? '#8a1c1c' : '#ff8a80',
+    },
+    bannerButton: {
+      backgroundColor: theme.accent,
+      borderRadius: 8,
+      paddingVertical: fs.spacing * 0.375,
+      paddingHorizontal: fs.spacing * 0.625,
+      marginRight: fs.spacing * 0.5,
+    },
+    bannerButtonText: { color: theme.onAccent, fontSize: fs.small, fontWeight: '700' },
     bannerClose: { padding: fs.spacing * 0.25 },
-    bannerCloseText: { color: '#4a3000', fontSize: fs.base, fontWeight: '700' },
+    bannerCloseText: { color: theme.textSecondary, fontSize: fs.base, fontWeight: '700' },
     center: { alignItems: 'center', justifyContent: 'center', flex: 1 },
     skyIconWrap: { marginBottom: fs.spacing },
     loadingText: { color: theme.textMuted, marginTop: fs.spacing * 0.625, fontSize: fs.base },
@@ -1815,65 +1506,66 @@ const buildStyles = (theme, fs, insets) =>
     staleLabel: { fontSize: fs.small * 0.9, color: theme.textMuted, textAlign: 'center', marginTop: fs.spacing * 0.125, fontStyle: 'italic' },
     copiedHint: { fontSize: fs.small * 0.9, color: theme.textSecondary, textAlign: 'center', marginTop: fs.spacing * 0.125 },
     cityTime: { fontSize: fs.base, color: theme.textSecondary, textAlign: 'center', marginTop: fs.spacing * 0.25 },
-    bigIconWrap: { alignItems: 'center', marginTop: fs.spacing },
-    temperature: { fontSize: fs.large * 2.5, fontWeight: '300', color: theme.text, textAlign: 'center' },
-    condition: { fontSize: fs.base * 1.25, color: theme.textSecondary, textAlign: 'center', marginBottom: fs.spacing },
-    detailRow: { flexDirection: 'row', justifyContent: 'space-around', marginVertical: fs.spacing },
-    detailCard: { backgroundColor: theme.surface, borderRadius: 12, paddingVertical: fs.spacing * 0.875, paddingHorizontal: fs.spacing * 1.25, alignItems: 'center', minHeight: fs.cardHeight * 0.7 },
-    detailValue: { color: theme.text, fontSize: fs.base, fontWeight: '600' },
-    detailLabel: { color: theme.textMuted, fontSize: fs.small, marginTop: fs.spacing * 0.25 },
+    bigIconWrap: { alignItems: 'center', marginTop: fs.spacing * 0.85 },
+    temperature: { fontSize: fs.large * 2.5, fontWeight: '300', color: theme.text, textAlign: 'center', fontVariant: ['tabular-nums'] },
+    condition: { fontSize: fs.base * 1.2, color: theme.textSecondary, textAlign: 'center' },
+    feelsLikeText: { fontSize: fs.small, color: theme.textMuted, textAlign: 'center', marginTop: fs.spacing * 0.2 },
+    detailGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: fs.spacing * 0.625,
+      marginVertical: fs.spacing,
+    },
+    detailCard: {
+      flexGrow: 1,
+      flexBasis: '45%',
+      backgroundColor: theme.surface,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: theme.border,
+      paddingVertical: fs.spacing * 0.75,
+      paddingHorizontal: fs.spacing * 0.875,
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: fs.cardHeight * 0.7,
+    },
+    detailValue: { color: theme.text, fontSize: fs.base, fontWeight: '600', textAlign: 'center', fontVariant: ['tabular-nums'] },
+    detailLabel: { color: theme.textMuted, fontSize: fs.small, marginTop: fs.spacing * 0.2, textAlign: 'center' },
     sectionTitle: { fontSize: fs.base * 1.125, fontWeight: '600', color: theme.text, marginTop: fs.spacing * 0.625, marginBottom: fs.spacing * 0.5 },
-    forecastRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: theme.surfaceAlt, borderRadius: 8, paddingHorizontal: fs.spacing * 0.875, paddingVertical: fs.spacing * 0.625, marginBottom: fs.spacing * 0.375 },
-    forecastDay: { color: theme.textSecondary, fontSize: fs.base * 0.9375, flex: 1, textAlign: 'left' },
-    forecastIconCell: { width: 40, alignItems: 'center' },
-    forecastTemp: { color: theme.text, fontSize: fs.base * 0.9375, fontWeight: '600', width: 90, textAlign: 'right' },
+    forecastRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: theme.surfaceAlt,
+      borderRadius: 10,
+      paddingHorizontal: fs.spacing * 0.75,
+      paddingVertical: fs.spacing * 0.6,
+      marginBottom: fs.spacing * 0.375,
+      gap: fs.spacing * 0.5,
+    },
+    forecastDay: { color: theme.textSecondary, fontSize: fs.base * 0.92, width: fs.spacing * 4.5, flexShrink: 0, textAlign: 'left' },
+    forecastIconCell: { width: 38, alignItems: 'center', justifyContent: 'center' },
+    forecastPrecip: { color: theme.accent, fontSize: Math.max(10, fs.small * 0.8), fontWeight: '700', marginTop: -2 },
+    rangeBarTrack: {
+      flex: 1,
+      height: 5,
+      borderRadius: 3,
+      backgroundColor: theme.border,
+      overflow: 'hidden',
+      position: 'relative',
+      minWidth: 36,
+    },
+    rangeBarFill: {
+      position: 'absolute',
+      top: 0,
+      bottom: 0,
+      borderRadius: 3,
+      backgroundColor: theme.accent,
+    },
+    forecastTemp: { color: theme.text, fontSize: fs.base * 0.92, fontWeight: '600', minWidth: 74, textAlign: 'right', fontVariant: ['tabular-nums'] },
     hourlyRow: { gap: fs.spacing * 0.5, paddingBottom: fs.spacing * 0.25 },
-    hourlyCard: { backgroundColor: theme.surfaceAlt, borderRadius: 10, paddingHorizontal: fs.spacing * 0.625, paddingVertical: fs.spacing * 0.5, alignItems: 'center', gap: fs.spacing * 0.25, minWidth: fs.spacing * 3.75 },
-    hourlyTime: { color: theme.textSecondary, fontSize: fs.small * 0.95 },
-    hourlyTemp: { color: theme.text, fontSize: fs.base * 0.9375, fontWeight: '600' },
-    settingsLayer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100 },
-    settingsDim: { ...StyleSheet.absoluteFillObject, backgroundColor: theme.dim },
-    settingsScreen: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.background },
-    settingsSafe: { flex: 1 },
-    settingsHeader: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs.spacing, paddingTop: insets.top + fs.spacing * 0.5, paddingBottom: fs.spacing * 0.75, borderBottomWidth: 1, borderBottomColor: theme.border },
-    settingsBackButton: { width: fs.spacing * 2.5, height: fs.spacing * 2.5, borderRadius: 12, backgroundColor: theme.surfaceRaised, alignItems: 'center', justifyContent: 'center', marginRight: fs.spacing * 0.625 },
-    settingsBackIcon: { fontSize: fs.base * 1.375, color: theme.textSecondary },
-    settingsHeaderTitle: { fontSize: fs.large * 1.15, fontWeight: '700', color: theme.text },
-    settingsBody: { flex: 1 },
-    settingsBodyContent: { paddingHorizontal: fs.spacing * 1.25, paddingTop: fs.spacing * 0.5, paddingBottom: fs.spacing * 2.125 },
-    settingsHero: { alignItems: 'center', paddingTop: fs.spacing * 0.875, paddingBottom: fs.spacing * 0.5, marginBottom: fs.spacing },
-    heroAppIcon: { width: fs.iconSize * 3.8, height: fs.iconSize * 3.8, borderRadius: 26, backgroundColor: '#FFFFFF', borderWidth: 0, marginBottom: fs.spacing * 0.75, alignItems: 'center', justifyContent: 'center', padding: fs.spacing },
-    heroTitle: { fontSize: fs.large * 1.15, fontWeight: '700', color: theme.text },
-    heroAuthor: { fontSize: fs.small, color: theme.textMuted, marginTop: fs.spacing * 0.25 },
-    heroVersion: { fontSize: fs.small * 0.846, color: theme.textMuted, marginTop: fs.spacing * 0.125 },
-    settingsSectionTitle: { fontSize: fs.small, fontWeight: '700', color: theme.textMuted, letterSpacing: 0.8, marginBottom: fs.spacing * 0.625, marginTop: fs.spacing * 1.375 },
-    cardStack: { gap: fs.spacing * 0.625 },
-    aboutCard: { flexDirection: 'row', alignItems: 'flex-start', backgroundColor: theme.surface, borderRadius: 16, paddingHorizontal: fs.spacing, paddingVertical: fs.spacing * 0.875, minHeight: 70 * fs.fontScale },
-    aboutCardTextWrap: { flex: 1, marginRight: fs.spacing * 0.5, minWidth: 0 },
-    aboutCardTitle: { fontSize: fs.base, fontWeight: '600', color: theme.text },
-    aboutCardDesc: { fontSize: fs.small, color: theme.textMuted, marginTop: fs.spacing * 0.125, lineHeight: fs.small * 1.3 },
-    interfaceIconWrap: {
-      width: fs.spacing * 2.625, height: fs.spacing * 2.625, borderRadius: 12,
-      backgroundColor: theme.background,
-      alignItems: 'center', justifyContent: 'center',
-      marginRight: fs.spacing * 0.75,
-    },
-    interfaceIconEmoji: { fontSize: fs.iconSize * 0.77 },
-    githubIconWrap: {
-      width: fs.spacing * 2.625, height: fs.spacing * 2.625, borderRadius: 12,
-      backgroundColor: theme.background,
-      alignItems: 'center', justifyContent: 'center',
-      marginRight: fs.spacing * 0.75,
-    },
-    settingsChevron: { fontSize: fs.base * 1.5, color: theme.textMuted, marginLeft: 'auto', flexShrink: 0 },
-    pickerLayer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20, alignItems: 'center', justifyContent: 'center', paddingHorizontal: fs.spacing * 1.5 },
-    pickerBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0, 0, 0, 0.45)' },
-    pickerCard: { width: '100%', maxWidth: 360, backgroundColor: theme.surface, borderRadius: 20, borderWidth: 1, borderColor: theme.border, padding: fs.spacing * 1.125 },
-    pickerTitle: { fontSize: fs.large * 1.15, fontWeight: '700', color: theme.text, marginBottom: fs.spacing * 0.75 },
-    pickerOption: { flexDirection: 'row', alignItems: 'center', paddingVertical: fs.spacing * 0.6875 },
-    radioOuter: { width: fs.spacing * 1.375, height: fs.spacing * 1.375, borderRadius: fs.spacing * 0.6875, borderWidth: 2, borderColor: theme.border, alignItems: 'center', justifyContent: 'center', marginRight: fs.spacing * 0.75 },
-    radioInner: { width: fs.spacing * 0.625, height: fs.spacing * 0.625, borderRadius: fs.spacing * 0.3125 },
-    pickerOptionTextWrap: { flex: 1 },
-    pickerOptionLabel: { fontSize: fs.base, fontWeight: '600', color: theme.text },
-    pickerOptionDesc: { fontSize: fs.small, color: theme.textMuted, marginTop: fs.spacing * 0.125 },
+    hourlyCard: { backgroundColor: theme.surfaceAlt, borderRadius: 12, paddingHorizontal: fs.spacing * 0.625, paddingVertical: fs.spacing * 0.5, alignItems: 'center', gap: fs.spacing * 0.2, minWidth: fs.spacing * 3.75 },
+    hourlyTime: { color: theme.textSecondary, fontSize: fs.small * 0.92, fontVariant: ['tabular-nums'] },
+    hourlyTemp: { color: theme.text, fontSize: fs.base * 0.92, fontWeight: '600', fontVariant: ['tabular-nums'] },
+    hourlyPrecip: { color: theme.accent, fontSize: Math.max(10, fs.small * 0.82), fontWeight: '700' },
   });
+};
