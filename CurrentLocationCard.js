@@ -6,10 +6,37 @@ import Svg, { Defs, RadialGradient, Stop, Rect } from 'react-native-svg';
 import { getWeatherTheme } from './DraggableCityCard';
 import PressableScale from './components/PressableScale';
 
+import { convertTemp } from './utils/weatherFormat';
+
+function displayCardTemp(item, tempUnit) {
+  if (typeof item?.tempC === 'number' && Number.isFinite(item.tempC)) {
+    const v = convertTemp(item.tempC, tempUnit);
+    return v === null ? '–' : String(Math.round(v));
+  }
+  const parsed = item?.temp !== undefined && item?.temp !== '' ? Number(item.temp) : NaN;
+  if (Number.isFinite(parsed)) {
+    const v = convertTemp(parsed, tempUnit);
+    return v === null ? '–' : String(Math.round(v));
+  }
+  return item?.temp || '–';
+}
+
+function displayCardMinMax(item, tempUnit) {
+  if (
+    typeof item?.maxC === 'number' && Number.isFinite(item.maxC) &&
+    typeof item?.minC === 'number' && Number.isFinite(item.minC)
+  ) {
+    const hi = Math.round(convertTemp(item.maxC, tempUnit));
+    const lo = Math.round(convertTemp(item.minC, tempUnit));
+    return `${hi}° / ${lo}°`;
+  }
+  return item?.minMax || '';
+}
+
 // Top card for the device's geolocation. Rendered ONLY when coordinates were
 // successfully resolved (location !== null). Deliberately NOT a DraggableCityCard:
 // no drag handle, no checkbox, no delete — it is not part of the saved list.
-export default function CurrentLocationCard({ item, theme, fs, t, onPress, style }) {
+const CurrentLocationCard = React.memo(function CurrentLocationCard({ item, theme, fs, t, tempUnit = 'C', onPress, style }) {
   const safeItem = { ...item, isNight: item?.isNight ?? false };
   const weatherTheme = getWeatherTheme(safeItem.weathercode, safeItem.isNight);
   const subText = 'rgba(255, 255, 255, 0.85)';
@@ -168,13 +195,15 @@ export default function CurrentLocationCard({ item, theme, fs, t, onPress, style
             </View>
             <View style={styles.cardRight}>
               <View style={styles.tempRow}>
-                <Text style={styles.cityTemp}>{safeItem.temp || '0'}</Text>
+                <Text style={styles.cityTemp}>{displayCardTemp(safeItem, tempUnit)}</Text>
                 <Text style={styles.tempDegree}>°</Text>
               </View>
-              <Text style={styles.cityMinMax}>{safeItem.minMax || ''}</Text>
+              <Text style={styles.cityMinMax}>{displayCardMinMax(safeItem, tempUnit)}</Text>
             </View>
           </View>
         </View>
     </PressableScale>
   );
-}
+});
+
+export default CurrentLocationCard;

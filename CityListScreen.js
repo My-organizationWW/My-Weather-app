@@ -9,10 +9,12 @@ import { CITIES_CHANGED_KEY } from './utils/citiesBackup';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from './ThemeContext';
 import { useFontSize } from './FontSizeContext';
+import { useSettings } from './SettingsContext';
 import { useTranslation } from 'react-i18next';
 import * as Location from 'expo-location';
 import { isOfflineError, isRegionLike, resolvePlaceName } from './geocoding';
 import { fetchForecast, searchCity } from './utils/weatherProviders';
+import { fetchJsonWithRetry, isExternalAbortError } from './utils/http';
 import ConfirmDeleteModal from './ConfirmDeleteModal';
 import DraggableCityCard from './DraggableCityCard';
 import CurrentLocationCard from './CurrentLocationCard';
@@ -25,27 +27,8 @@ const CONFIRM_DELETE_KEY = 'confirm_delete_enabled';
 const BASE_URL = 'https://api.open-meteo.com/v1/forecast';
 const FETCH_TIMEOUT_MS = 15000;
 
-// fetch with timeout + single retry. Transient TLS failures (common
-// through VPNs) usually succeed on the second attempt.
-async function fetchJson(url, timeoutMs = FETCH_TIMEOUT_MS, retries = 1) {
-  let lastError;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timer);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch (e) {
-      clearTimeout(timer);
-      lastError = e;
-      if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, 500));
-      }
-    }
-  }
-  throw lastError;
+function makeCityFetchJson(signal, timeoutMs = FETCH_TIMEOUT_MS, retries = 1) {
+  return (url) => fetchJsonWithRetry(url, { timeoutMs, retries, signal });
 }
 
 // Pulsing placeholder shown only when there is genuinely nothing cached
@@ -170,8 +153,20 @@ export default function CityListScreen() {
   const navigation = useNavigation();
   const { theme } = useTheme();
   const fs = useFontSize();
+  const { tempUnit } = useSettings();
   const { t, i18n } = useTranslation();
   const insets = useSafeAreaInsets();
+  const mountedRef = useRef(true);
+  const refreshSeqRef = useRef(0);
+  const refreshAbortRef = useRef(null);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    refreshSeqRef.current += 1;
+    if (refreshAbortRef.current) {
+      try { refreshAbortRef.current.abort(); } catch (e) {}
+    }
+  }, []);
 
   // Saved cities ONLY — the geolocation card lives in `currentLocation`
   // and is never part of this array (not draggable, selectable or deletable).
@@ -620,12 +615,7 @@ export default function CityListScreen() {
     }, [])
   );
 
-  // Shared open-meteo enrichment for a coordinate pair. Returns the weather
-  // fields object or null (no usable data). fetchJson errors propagate so
-  // callers can apply their own offline/circuit-breaker policy.
-  // Provider layer: OM slim shape, 7Timer fallback normalized to the
-  // same contract (downstream field reads unchanged).
-  const fetchWeatherForCoords = async (lat, lon) => {
+  const fetchWeatherForCoords = async (lat, lon, fetchJson) => {
     const weatherData = await fetchForecast(
       lat,
       lon,
@@ -633,14 +623,20 @@ export default function CityListScreen() {
       `${BASE_URL}?latitude=${lat}&longitude=${lon}&current_weather=true&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto`
     );
     if (!weatherData || !weatherData.current_weather) return null;
-    const temp = Math.round(weatherData.current_weather.temperature);
-    const min = weatherData.daily?.temperature_2m_min ? Math.round(weatherData.daily.temperature_2m_min[0]) : '';
-    const max = weatherData.daily?.temperature_2m_max ? Math.round(weatherData.daily.temperature_2m_max[0]) : '';
+    const rawTemp = weatherData.current_weather.temperature;
+    const tempC = typeof rawTemp === 'number' && Number.isFinite(rawTemp) ? rawTemp : null;
+    const rawMin = weatherData.daily?.temperature_2m_min?.[0];
+    const rawMax = weatherData.daily?.temperature_2m_max?.[0];
+    const minC = typeof rawMin === 'number' && Number.isFinite(rawMin) ? rawMin : null;
+    const maxC = typeof rawMax === 'number' && Number.isFinite(rawMax) ? rawMax : null;
     const code = weatherData.current_weather.weathercode;
     const isNight = weatherData.current_weather.is_day === 0;
     return {
-      temp: `${temp}`,
-      minMax: min !== '' && max !== '' ? `${max}° / ${min}°` : '',
+      tempC,
+      minC,
+      maxC,
+      temp: tempC !== null ? `${Math.round(tempC)}` : '–',
+      minMax: minC !== null && maxC !== null ? `${Math.round(maxC)}° / ${Math.round(minC)}°` : '',
       condition: getWeatherConditionText(code),
       weathercode: code,
       isNight,
@@ -648,8 +644,18 @@ export default function CityListScreen() {
   };
 
   const loadSavedCitiesAndRefresh = async () => {
+    const seq = ++refreshSeqRef.current;
+    if (refreshAbortRef.current) {
+      try { refreshAbortRef.current.abort(); } catch (e) {}
+    }
+    const controller = new AbortController();
+    refreshAbortRef.current = controller;
+    const fetchJson = makeCityFetchJson(controller.signal, FETCH_TIMEOUT_MS, 1);
+    const probeFetch = makeCityFetchJson(controller.signal, 5000, 0);
+
     try {
       const data = await AsyncStorage.getItem(SAVED_CITIES_KEY);
+      if (!mountedRef.current || seq !== refreshSeqRef.current) return;
       let list = [];
       if (data) {
         try {
@@ -659,9 +665,9 @@ export default function CityListScreen() {
         }
       } else {
         list = [
-          { id: '1', name: 'Москва' },
-          { id: '2', name: 'Санкт-Петербург' },
-          { id: '3', name: 'Сочи' },
+          { id: '1', name: 'Москва', latitude: 55.7558, longitude: 37.6173 },
+          { id: '2', name: 'Санкт-Петербург', latitude: 59.9343, longitude: 30.3351 },
+          { id: '3', name: 'Сочи', latitude: 43.5974, longitude: 39.7154 },
         ];
       }
 
@@ -684,62 +690,42 @@ export default function CityListScreen() {
           return { ...city, id };
         });
       }
-      // Optimistic paint: cached cities (with last-known weather) hit the
-      // screen instantly — no full-screen spinner. The probe + per-city
-      // refresh below runs in the background and swaps data in on arrival
-      // (same setCities path, no full reload). Skeleton only when there is
-      // genuinely nothing to show yet.
       if (list.length > 0) {
         setCities(list);
       } else {
         setIsLoading(true);
       }
-      
+
       const currentLang = i18n.language || 'ru';
-      // No NetInfo fast-fail (it reports the VPN tunnel, not reachability).
-      // The probe below is the real connectivity test: true offline fails
-      // it in 5s and shows the stored list; a lying "offline" never blocks.
-      const showStored = () => setCities(list);
-      // Real connectivity test through the SAME provider layer the loop
-      // uses (OM-first with 7Timer fallback, 5s per leg). Probing OM alone
-      // used to misclassify a blocked OM host as "offline" and skip the
-      // refresh that the fallback would have fulfilled (the 0° cards bug).
-      // Only when BOTH legs are dead do we show stored data. Bonus: a
-      // failed OM leg trips the circuit breaker, so the loop below skips
-      // straight to fallback instead of burning timeouts per city.
+      const showStored = () => {
+        if (mountedRef.current && seq === refreshSeqRef.current) setCities(list);
+      };
       try {
         await fetchForecast(
           55.75,
           37.61,
-          (url) => fetchJson(url, 5000, 0),
+          probeFetch,
           `${BASE_URL}?latitude=55.75&longitude=37.61&current_weather=true&timezone=auto`
         );
       } catch (e) {
+        if (isExternalAbortError(e)) return;
         showStored();
         return;
       }
-      // Sequential refresh: parallel TLS handshakes through a VPN often
-      // fail with SSLHandshakeException, so go one city at a time.
-      // circuitOpen stops burning timeouts on the rest if the connection
-      // drops mid-refresh.
+      if (!mountedRef.current || seq !== refreshSeqRef.current) return;
+
       let circuitOpen = false;
       const updatedList = [];
       for (const city of list) {
+        if (!mountedRef.current || seq !== refreshSeqRef.current) return;
         if (circuitOpen) {
           updatedList.push(city);
           continue;
         }
         try {
-          // STRICT: a saved city's name is frozen at add time and is NEVER
-          // rewritten on refresh. Refresh uses stored coordinates only —
-          // no geocoding, no reverse-geocoding (both can return a district
-          // like "Прионежский район" or "Бор" instead of the real city).
           let lat = city.latitude;
           let lon = city.longitude;
-          if (lat === undefined || lon === undefined) {
-            // Legacy entry without coordinates: one explicit lookup.
-            // Region hits are ignored: a stored city must keep pointing
-            // at a real populated place, never at a country center.
+          if (typeof lat !== 'number' || typeof lon !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lon)) {
             const hit = await searchCity(city.name, currentLang, fetchJson);
             if (hit && !isRegionLike(hit)) {
               lat = hit.latitude;
@@ -747,8 +733,8 @@ export default function CityListScreen() {
             }
           }
 
-          if (lat !== undefined && lon !== undefined) {
-            const enrichment = await fetchWeatherForCoords(lat, lon);
+          if (typeof lat === 'number' && typeof lon === 'number' && Number.isFinite(lat) && Number.isFinite(lon)) {
+            const enrichment = await fetchWeatherForCoords(lat, lon, fetchJson);
             if (enrichment) {
               updatedList.push({
                 ...city,
@@ -761,9 +747,7 @@ export default function CityListScreen() {
             }
           }
         } catch (e) {
-          // Offline errors are expected: keep the stored data quietly
-          // instead of spamming LogBox warnings (one per city), and stop
-          // trying the remaining cities (circuit breaker).
+          if (isExternalAbortError(e)) return;
           if (!isOfflineError(e)) {
             console.warn(`Failed to refresh city ${city.name}:`, e?.message || e);
           } else {
@@ -773,45 +757,50 @@ export default function CityListScreen() {
         updatedList.push(city);
       }
 
-        // Merge enriched weather data into the CURRENT user order
-        // so any drag-and-drop reordering done while refreshing isn't wiped out.
-        const byId = new Map(updatedList.map(c => [c.id, c]));
-        const merged = citiesRef.current.map(c => byId.get(c.id) ?? c);
-        setCities(merged);
-        await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(merged));
+      if (!mountedRef.current || seq !== refreshSeqRef.current) return;
+      const byId = new Map(updatedList.map(c => [c.id, c]));
+      const merged = citiesRef.current.map(c => byId.get(c.id) ?? c);
+      setCities(merged);
+      await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(merged));
     } catch (e) {
-      console.error(e);
+      if (!isExternalAbortError(e)) console.error(e);
     } finally {
-      setIsLoading(false);
-      setRefreshing(false);
+      if (mountedRef.current && seq === refreshSeqRef.current) {
+        setIsLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
-  // GEOLOCATION STREAM (top card). Shows ONLY when coordinates were
-  // successfully resolved AND weather loaded. Any failure (denied permission,
-  // timeout, offline) -> null -> no card in the render tree at all.
-  // Runs on screen open and on pull-to-refresh, independent of the saved list.
+  // GEOLOCATION STREAM (top card). Uses getForegroundPermissionsAsync so
+  // opening CityList never spams an OS permission dialog when previously denied.
   const loadCurrentLocation = async () => {
+    let timer;
     try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
+      const { status } = await Location.getForegroundPermissionsAsync();
       if (status !== 'granted') {
-        setCurrentLocation(null);
+        if (mountedRef.current) setCurrentLocation(null);
         return;
       }
       const position = await Promise.race([
         Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('location timeout')), 12000)),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('location timeout')), 12000);
+        }),
       ]);
+      clearTimeout(timer);
+      if (!mountedRef.current) return;
       const { latitude, longitude } = position.coords;
       const currentLang = i18n.language || 'ru';
-      const enrichment = await fetchWeatherForCoords(latitude, longitude);
+      const locFetch = makeCityFetchJson(refreshAbortRef.current?.signal, FETCH_TIMEOUT_MS, 1);
+      const enrichment = await fetchWeatherForCoords(latitude, longitude, locFetch);
+      if (!mountedRef.current) return;
       if (!enrichment) {
         setCurrentLocation(null);
         return;
       }
-      // Shared chain (native -> Open-Meteo -> BigDataCloud). Total miss
-      // keeps the old behavior: coordinate string, card non-tappable.
-      const resolved = await resolvePlaceName(latitude, longitude, currentLang, fetchJson);
+      const resolved = await resolvePlaceName(latitude, longitude, currentLang, locFetch);
+      if (!mountedRef.current) return;
       setCurrentLocation({
         id: '__current_location__',
         name: resolved?.name ?? `${latitude.toFixed(2)}, ${longitude.toFixed(2)}`,
@@ -821,7 +810,8 @@ export default function CityListScreen() {
         ...enrichment,
       });
     } catch (e) {
-      setCurrentLocation(null);
+      clearTimeout(timer);
+      if (mountedRef.current && !isExternalAbortError(e)) setCurrentLocation(null);
     }
   };
 
@@ -871,98 +861,51 @@ export default function CityListScreen() {
     if (!searchQuery.trim()) return;
     const cityName = searchQuery.trim();
     const currentLang = i18n.language || 'ru';
+    const addFetch = makeCityFetchJson(undefined, FETCH_TIMEOUT_MS, 1);
     try {
       setIsLoading(true);
-      // searchQuery is captured in cityName up front and reused for every
-      // fallback step, so the retries use the exact same input.
-      // 1. Current language -> 2. English -> 3. transliterated variants.
-      const hit = await searchCity(cityName, currentLang, fetchJson);
+      const hit = await searchCity(cityName, currentLang, addFetch);
 
       if (!hit) {
         Alert.alert(t('cities.error'), t('cities.city_not_found'));
-        setIsLoading(false);
         return;
       }
       if (isRegionLike(hit)) {
         Alert.alert(t('cities.error'), t('enterCityNotCountry'));
-        setIsLoading(false);
         return;
       }
       const { latitude, longitude, name } = hit;
-      const weatherData = await fetchForecast(
-        latitude,
-        longitude,
-        fetchJson,
-        `${BASE_URL}?latitude=${latitude}&longitude=${longitude}&current_weather=true&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto`
-      );
-      const temp = weatherData?.current_weather ? Math.round(weatherData.current_weather.temperature) : 0;
-      const min = weatherData?.daily?.temperature_2m_min ? Math.round(weatherData.daily.temperature_2m_min[0]) : '';
-      const max = weatherData?.daily?.temperature_2m_max ? Math.round(weatherData.daily.temperature_2m_max[0]) : '';
-      const code = weatherData?.current_weather?.weathercode || 0;
-      const isNight = weatherData?.current_weather?.is_day === 0;
-
-      const newCity = {
-        id: Date.now().toString(),
-        name: name || cityName,
-        latitude,
-        longitude,
-        temp: `${temp}`,
-        minMax: min !== '' && max !== '' ? `${max}° / ${min}°` : '',
-        condition: getWeatherConditionText(code),
-        weathercode: code,
-        isNight,
-      };
-
-      const isDuplicate = cities.some(
-        c => c.name?.trim().toLowerCase() === (name || cityName).trim().toLowerCase()
+      const resolvedName = name || cityName;
+      const isDuplicate = citiesRef.current.some(
+        c => c.name?.trim().toLowerCase() === resolvedName.trim().toLowerCase()
       );
       if (isDuplicate) {
-        Alert.alert(t('cities.notice') || '', t('cities.already_added') || 'Город уже в списке');
+        Alert.alert(t('cities.notice'), t('cities.already_added'));
         setSearchQuery('');
         return;
       }
 
-      const updated = [...cities, newCity];
+      const enrichment = await fetchWeatherForCoords(latitude, longitude, addFetch);
+      const newCity = {
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        name: resolvedName,
+        latitude,
+        longitude,
+        ...(enrichment || { temp: '–', minMax: '', condition: getWeatherConditionText(0), weathercode: 0, isNight: false }),
+      };
+
+      const updated = [...citiesRef.current, newCity];
       setCities(updated);
       await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(updated));
       setSearchQuery('');
     } catch (e) {
       Alert.alert(t('cities.error'), t('cities.add_failed'));
     } finally {
-      setIsLoading(false);
+      if (mountedRef.current) setIsLoading(false);
     }
   };
 
-  const handleLongPressCity = (id, name, index) => {
-    if (!isSelectionMode) {
-      // Long-press only OPENS the editor. Nothing is pre-selected: the user
-      // decides which cards to delete by tapping their checkboxes.
-      setIsSelectionMode(true);
-      setSelectedCities(new Set());
-    } else {
-      toggleSelectCity(id);
-    }
-  };
-
-  const handlePressCity = (id, name, index) => {
-    if (isSelectionMode) {
-      toggleSelectCity(id);
-    } else {
-      handleSelectCity(name);
-    }
-  };
-
-  const moveCity = async (fromIndex, toIndex) => {
-    if (fromIndex === 0 || toIndex === 0) return; // index 0 is protected
-    if (toIndex < 1 || toIndex >= cities.length) return;
-    const newCities = [...cities];
-    const [moved] = newCities.splice(fromIndex, 1);
-    newCities.splice(toIndex, 0, moved);
-    setCities(newCities);
-    await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(newCities));
-  };
-
-  const toggleSelectCity = (id) => {
+  const toggleSelectCity = useCallback((id) => {
     setSelectedCities(prev => {
       const next = new Set(prev);
       if (next.has(id)) {
@@ -972,31 +915,60 @@ export default function CityListScreen() {
       }
       return next;
     });
-  };
+  }, []);
 
+  const handleSelectCity = useCallback(async (cityName, latitude, longitude) => {
+    try {
+      await AsyncStorage.setItem(LAST_SELECTED_CITY_KEY, cityName);
+      const params = { selectedCity: cityName, ts: Date.now() };
+      if (typeof latitude === 'number' && typeof longitude === 'number' && Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        params.latitude = latitude;
+        params.longitude = longitude;
+      }
+      navigation.navigate('Tabs', { screen: 'weather', params });
+    } catch (e) {
+      navigation.navigate('Tabs', { screen: 'weather' });
+    }
+  }, [navigation]);
 
+  const handleLongPressCity = useCallback((id) => {
+    if (!isSelectionMode) {
+      setIsSelectionMode(true);
+      setSelectedCities(new Set());
+    } else {
+      toggleSelectCity(id);
+    }
+  }, [isSelectionMode, toggleSelectCity]);
 
-  const cancelSelectionMode = () => {
+  const handlePressCity = useCallback((id, name) => {
+    if (isSelectionMode) {
+      toggleSelectCity(id);
+    } else {
+      const found = citiesRef.current.find((c) => c.id === id);
+      handleSelectCity(name, found?.latitude, found?.longitude);
+    }
+  }, [isSelectionMode, toggleSelectCity, handleSelectCity]);
+
+  const cancelSelectionMode = useCallback(() => {
     setIsSelectionMode(false);
     setSelectedCities(new Set());
-  };
+  }, []);
 
   const allSelected = cities.length > 0 && selectedCities.size === cities.length;
 
-  const toggleSelectAll = () => {
+  const toggleSelectAll = useCallback(() => {
     if (allSelected) {
       setSelectedCities(new Set());
     } else {
-      setSelectedCities(new Set(cities.map((c) => c.id)));
+      setSelectedCities(new Set(citiesRef.current.map((c) => c.id)));
     }
-  };
+  }, [allSelected]);
 
   const handlePromptBatchDelete = () => {
     if (selectedCities.size === 0) return;
     if (confirmDelete) {
       setDeleteTarget({ count: selectedCities.size });
     } else {
-      // Confirmation disabled in Settings — delete immediately.
       handleConfirmDelete();
     }
   };
@@ -1004,7 +976,7 @@ export default function CityListScreen() {
   const handleConfirmDelete = async () => {
     if (isSelectionMode) {
       if (selectedCities.size === 0) return;
-      const updated = cities.filter(c => !selectedCities.has(c.id));
+      const updated = citiesRef.current.filter(c => !selectedCities.has(c.id));
       setCities(updated);
       await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(updated));
       setIsSelectionMode(false);
@@ -1012,33 +984,23 @@ export default function CityListScreen() {
       setDeleteTarget(null);
     } else {
       if (!deleteTarget) return;
-      const updated = cities.filter(c => c.id !== deleteTarget.id);
+      const updated = citiesRef.current.filter(c => c.id !== deleteTarget.id);
       setCities(updated);
       await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(updated));
       setDeleteTarget(null);
     }
   };
 
-  const handleCancelDelete = () => {
+  const handleCancelDelete = useCallback(() => {
     setDeleteTarget(null);
-  };
-
-  const handleSelectCity = async (cityName) => {
-    try {
-      await AsyncStorage.setItem(LAST_SELECTED_CITY_KEY, cityName);
-      navigation.navigate('Tabs', { screen: 'weather', params: { selectedCity: cityName } });
-    } catch (e) {
-      navigation.navigate('Tabs', { screen: 'weather' });
-    }
-  };
+  }, []);
 
   // NOTE: rows intentionally carry NO entering animation. A per-row
-  // Animated wrapper destabilized the drag system on-device (re-mounts
-  // and entering/layout interplay around the draggable cards); the list
+  // Animated wrapper destabilized the drag system on-device; the list
   // entrance is animated once at the container level below instead.
-  const renderItem = ({ item, index }) => {
+  const renderItem = useCallback(({ item, index }) => {
     return (
-       <DraggableCityCard
+      <DraggableCityCard
         item={item}
         index={index}
         isSelectionMode={isSelectionMode}
@@ -1046,6 +1008,7 @@ export default function CityListScreen() {
         theme={theme}
         fs={fs}
         t={t}
+        tempUnit={tempUnit}
         onSelectToggle={handlePressCity}
         onLongPressCity={handleLongPressCity}
         dragOffset={dragOffset}
@@ -1057,10 +1020,42 @@ export default function CityListScreen() {
         trace={trace}
         released={released}
         order={order}
-         itemCount={cities.length}
-       />
+        itemCount={cities.length}
+      />
     );
-  };
+  }, [
+    isSelectionMode, selectedCities, theme, fs, t, tempUnit,
+    handlePressCity, handleLongPressCity, dragOffset, activeIndex, activeId,
+    beginDrag, endDrag, commitReorder, trace, released, order, cities.length,
+  ]);
+
+  const keyExtractor = useCallback((item, index) => String(item?.id ?? index), []);
+
+  const listHeaderElement = useMemo(() => (
+    <View>
+      {currentLocation ? (
+        <View>
+          <View style={[styles.sectionHeader, { paddingTop: 8 }]}>
+            <Text style={styles.sectionHeaderText}>{t('cities.current_location')}</Text>
+          </View>
+          <CurrentLocationCard
+            item={currentLocation}
+            theme={theme}
+            fs={fs}
+            t={t}
+            tempUnit={tempUnit}
+            style={{ marginBottom: fs.spacing * 0.6 }}
+            onPress={currentLocation.isCoordinateFallback
+              ? undefined
+              : () => handleSelectCity(currentLocation.name, currentLocation.latitude, currentLocation.longitude)}
+          />
+        </View>
+      ) : null}
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionHeaderText}>{t('cities.saved_cities')}</Text>
+      </View>
+    </View>
+  ), [currentLocation, styles, t, theme, fs, tempUnit, handleSelectCity]);
 
   return (
     <ScreenWrapper contentStyle={{ paddingTop: Math.max(insets.top - 12, 0) }}>
@@ -1074,7 +1069,7 @@ export default function CityListScreen() {
         >
           <Ionicons name={isSelectionMode ? "close" : "arrow-back"} size={22} color={theme.text} />
         </PressableScale>
-        <Text
+        <Animated.Text
           style={[styles.headerTitle, { color: theme.text }, headerTitleAnimStyle]}
           numberOfLines={1}
           ellipsizeMode="tail"
@@ -1082,10 +1077,10 @@ export default function CityListScreen() {
           minimumFontScale={0.8}
         >
           {isSelectionMode ? getPluralSelectedText(selectedCities.size, t) : t('cities.title')}
-        </Text>
+        </Animated.Text>
         {isSelectionMode && (
           <PressableScale onPress={toggleSelectAll} style={{ paddingHorizontal: fs.spacing * 0.5 }} scaleTo={0.94}>
-            <Text style={{ color: theme.tint || '#3a7bd5', fontSize: fs.base, fontWeight: '600' }}>
+            <Text style={{ color: theme.accent, fontSize: fs.base, fontWeight: '600' }}>
               {allSelected ? t('cities.deselect_all') : t('cities.select_all')}
             </Text>
           </PressableScale>
@@ -1107,12 +1102,12 @@ export default function CityListScreen() {
           editable={!isSelectionMode}
         />
         <PressableScale
-          style={[styles.addButton, { backgroundColor: theme.tint || '#3a7bd5' }]}
+          style={[styles.addButton, { backgroundColor: theme.accent }]}
           onPress={handleAddCity}
           scaleTo={0.9}
           haptic
         >
-          <Ionicons name="add" size={24} color="#FFFFFF" />
+          <Ionicons name="add" size={24} color={theme.onAccent || '#FFFFFF'} />
         </PressableScale>
       </Animated.View>
 
@@ -1125,12 +1120,6 @@ export default function CityListScreen() {
           <SkeletonCard theme={theme} fs={fs} />
         </View>
       ) : (
-        // Single entrance animation for the whole list (fade + slight
-        // rise, 300ms ease-out). It plays on every mount of this branch —
-        // which coincides exactly with the list appearing (fresh open,
-        // spinner -> data flip, offline restore). Refreshes, scroll
-        // mounts and selection changes never remount it, so no replays.
-        // Rows themselves stay animation-free: drag physics untouched.
         <Animated.View
           entering={
             FadeInUp.duration(300)
@@ -1142,36 +1131,13 @@ export default function CityListScreen() {
           <DragCellContext.Provider value={dragCellValue}>
           <FlatList
             data={renderList}
-            keyExtractor={(item, index) => String(item?.id ?? index)}
+            keyExtractor={keyExtractor}
             renderItem={renderItem}
             CellRendererComponent={DragCell}
             // Cards are placed by transforms; clipping by layout bounds
             // could detach a card that is visually on screen.
             removeClippedSubviews={false}
-            ListHeaderComponent={
-              <View>
-                {currentLocation ? (
-                  <View>
-                    <View style={[styles.sectionHeader, { paddingTop: 8 }]}>
-                      <Text style={styles.sectionHeaderText}>{t('cities.current_location')}</Text>
-                    </View>
-                    <CurrentLocationCard
-                      item={currentLocation}
-                      theme={theme}
-                      fs={fs}
-                      t={t}
-                      style={{ marginBottom: fs.spacing * 0.6 }}
-                      onPress={currentLocation.isCoordinateFallback
-                        ? undefined
-                        : () => handleSelectCity(currentLocation.name)}
-                    />
-                  </View>
-                ) : null}
-                <View style={styles.sectionHeader}>
-                  <Text style={styles.sectionHeaderText}>{t('cities.saved_cities')}</Text>
-                </View>
-              </View>
-            }
+            ListHeaderComponent={listHeaderElement}
             ListEmptyComponent={
               <Text style={styles.emptyListText}>{t('cities.empty_list')}</Text>
             }

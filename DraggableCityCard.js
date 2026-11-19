@@ -18,6 +18,32 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Defs, RadialGradient, Stop, Rect } from 'react-native-svg';
 import { saveDragTrace } from './utils/dragTrace';
+import { convertTemp } from './utils/weatherFormat';
+
+function displayCardTemp(item, tempUnit) {
+  if (typeof item?.tempC === 'number' && Number.isFinite(item.tempC)) {
+    const v = convertTemp(item.tempC, tempUnit);
+    return v === null ? '–' : String(Math.round(v));
+  }
+  const parsed = item?.temp !== undefined && item?.temp !== '' ? Number(item.temp) : NaN;
+  if (Number.isFinite(parsed)) {
+    const v = convertTemp(parsed, tempUnit);
+    return v === null ? '–' : String(Math.round(v));
+  }
+  return item?.temp || '–';
+}
+
+function displayCardMinMax(item, tempUnit) {
+  if (
+    typeof item?.maxC === 'number' && Number.isFinite(item.maxC) &&
+    typeof item?.minC === 'number' && Number.isFinite(item.minC)
+  ) {
+    const hi = Math.round(convertTemp(item.maxC, tempUnit));
+    const lo = Math.round(convertTemp(item.minC, tempUnit));
+    return `${hi}° / ${lo}°`;
+  }
+  return item?.minMax || '';
+}
 
 const LANDING = { duration: 180, easing: Easing.out(Easing.quad) };
 
@@ -38,7 +64,7 @@ const SELECTION_TIMING = {
   easing: Easing.bezier(0.22, 1, 0.36, 1),
 };
 
-export default function DraggableCityCard({
+const DraggableCityCard = React.memo(function DraggableCityCard({
   item,
   index,
   isSelectionMode,
@@ -46,6 +72,7 @@ export default function DraggableCityCard({
   theme,
   fs,
   t,
+  tempUnit = 'C',
   onSelectToggle,
   onLongPressCity,
   dragOffset,
@@ -362,7 +389,7 @@ export default function DraggableCityCard({
                 style={[
                   styles.checkbox,
                   { borderColor: 'rgba(255, 255, 255, 0.85)' },
-                  isSelected && { backgroundColor: theme.tint || '#3a7bd5', borderColor: theme.tint || '#3a7bd5' },
+                  isSelected && { backgroundColor: theme.accent || '#3a7bd5', borderColor: theme.accent || '#3a7bd5' },
                 ]}
                 hitSlop={8}
                 onPress={() => onSelectToggle(safeItem.id, safeItem.name, index)}
@@ -397,17 +424,19 @@ export default function DraggableCityCard({
           </View>
           <View style={styles.cardRight}>
             <View style={styles.tempRow}>
-              <Text style={styles.cityTemp}>{safeItem.temp || '–'}</Text>
+              <Text style={styles.cityTemp}>{displayCardTemp(safeItem, tempUnit)}</Text>
               <Text style={styles.tempDegree}>°</Text>
             </View>
-            <Text style={styles.cityMinMax}>{safeItem.minMax || ''}</Text>
+            <Text style={styles.cityMinMax}>{displayCardMinMax(safeItem, tempUnit)}</Text>
           </View>
         </View>
       </View>
       </Pressable>
     </Animated.View>
   );
-}
+});
+
+export default DraggableCityCard;
 
 export const getWeatherTheme = (code, isNight) => {
   const c = code ?? 2;
