@@ -1,4 +1,9 @@
+// Pure weather formatting and data-extraction helpers (no React Native / i18n deps).
+
+const COMPASS_KEYS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+
 function weathercodeToType(code) {
+  if (typeof code !== 'number' || !Number.isFinite(code)) return 'clear';
   if (code === 0) return 'clear';
   if (code <= 3) return 'partly';
   if (code <= 48) return 'fog';
@@ -24,13 +29,17 @@ function isCoordsLikeText(s) {
 // Next N timeline entries (hourly forecast + sunrise/sunset events) starting from current hour.
 function getHourlyTimeline(data, count = 24) {
   if (!data) return [];
-  if (!data.hourly || !data.hourly.time) {
+  if (!data.hourly || !Array.isArray(data.hourly.time) || data.hourly.time.length === 0) {
     const now = new Date();
     const times = [];
     const temps = [];
     const codes = [];
-    const baseTemp = data.current_weather?.temperature ?? 20;
-    const baseCode = data.current_weather?.weathercode ?? 0;
+    const baseTemp = typeof data.current_weather?.temperature === 'number'
+      ? data.current_weather.temperature
+      : null;
+    const baseCode = typeof data.current_weather?.weathercode === 'number'
+      ? data.current_weather.weathercode
+      : 0;
     for (let i = 0; i < count; i++) {
       const d = new Date(now.getTime() + i * 3600000);
       const pad = (n) => String(n).padStart(2, '0');
@@ -40,32 +49,34 @@ function getHourlyTimeline(data, count = 24) {
     }
     data = {
       ...data,
-      hourly: { time: times, temperature_2m: temps, weathercode: codes }
+      hourly: { time: times, temperature_2m: temps, weathercode: codes },
     };
   }
   const offset = typeof data.utc_offset_seconds === 'number' ? data.utc_offset_seconds : 0;
   const now = new Date(Date.now() + new Date().getTimezoneOffset() * 60000 + offset * 1000);
   const pad = (n) => String(n).padStart(2, '0');
   const nowHour = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}`;
-  
+
   let startIdx = data.hourly.time.findIndex((t) => String(t).slice(0, 13) >= nowHour);
   if (startIdx === -1) startIdx = 0;
-  
+
   const endIndex = Math.min(data.hourly.time.length, startIdx + count);
   const startTime = data.hourly.time[startIdx];
   const endTime = data.hourly.time[endIndex - 1] || '9999-12-31T23:59';
 
   const items = [];
   for (let k = startIdx; k < endIndex; k++) {
+    const rawProb = data.hourly.precipitation_probability?.[k];
     items.push({
       type: 'hour',
       time: data.hourly.time[k],
       temp: data.hourly.temperature_2m?.[k],
       code: data.hourly.weathercode?.[k],
+      precipProb: typeof rawProb === 'number' && Number.isFinite(rawProb) ? Math.round(rawProb) : null,
     });
   }
 
-  if (data.daily && data.daily.sunrise && data.daily.sunset) {
+  if (data.daily && Array.isArray(data.daily.sunrise) && Array.isArray(data.daily.sunset)) {
     for (let i = 0; i < data.daily.sunrise.length; i++) {
       const sr = data.daily.sunrise[i];
       if (sr && sr >= startTime && sr <= endTime) {
@@ -83,6 +94,7 @@ function getHourlyTimeline(data, count = 24) {
 }
 
 function beaufortFromMs(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return 0;
   const v = Math.abs(ms);
   if (v <= 0.2) return 0;
   if (v <= 1.5) return 1;
@@ -100,11 +112,13 @@ function beaufortFromMs(ms) {
 }
 
 function convertTemp(celsius, unit) {
+  if (typeof celsius !== 'number' || !Number.isFinite(celsius)) return null;
   if (unit === 'F') return celsius * 9 / 5 + 32;
   return celsius;
 }
 
 function convertWind(speedKmh, unit) {
+  if (typeof speedKmh !== 'number' || !Number.isFinite(speedKmh)) return null;
   if (unit === 'ms') return speedKmh / 3.6;
   if (unit === 'mph') return speedKmh / 1.609344;
   if (unit === 'knots') return speedKmh / 1.852;
@@ -113,11 +127,80 @@ function convertWind(speedKmh, unit) {
 }
 
 function formatTemp(celsius, unit) {
-  return `${Math.round(convertTemp(celsius, unit))}°`;
+  const v = convertTemp(celsius, unit);
+  if (v === null) return '–';
+  const rounded = Math.round(v);
+  // Avoid displaying "-0°"
+  return `${rounded === 0 ? 0 : rounded}°`;
+}
+
+function windDirectionKey(deg) {
+  if (typeof deg !== 'number' || !Number.isFinite(deg)) return null;
+  const norm = ((deg % 360) + 360) % 360;
+  const idx = Math.round(norm / 45) % 8;
+  return COMPASS_KEYS[idx];
+}
+
+function hpaToMmHg(hpa) {
+  if (typeof hpa !== 'number' || !Number.isFinite(hpa) || hpa <= 0) return null;
+  return Math.round(hpa * 0.750062);
+}
+
+function computeWeeklyTempBounds(daily) {
+  if (!daily || !Array.isArray(daily.temperature_2m_min) || !Array.isArray(daily.temperature_2m_max)) {
+    return null;
+  }
+  const vals = [];
+  for (const v of daily.temperature_2m_min) {
+    if (typeof v === 'number' && Number.isFinite(v)) vals.push(v);
+  }
+  for (const v of daily.temperature_2m_max) {
+    if (typeof v === 'number' && Number.isFinite(v)) vals.push(v);
+  }
+  if (vals.length === 0) return null;
+  return { min: Math.min(...vals), max: Math.max(...vals) };
+}
+
+function computeDayRangeFractions(dayMin, dayMax, weekMin, weekMax) {
+  if (
+    typeof dayMin !== 'number' || !Number.isFinite(dayMin) ||
+    typeof dayMax !== 'number' || !Number.isFinite(dayMax) ||
+    typeof weekMin !== 'number' || !Number.isFinite(weekMin) ||
+    typeof weekMax !== 'number' || !Number.isFinite(weekMax)
+  ) {
+    return null;
+  }
+  const lo = Math.min(dayMin, dayMax);
+  const hi = Math.max(dayMin, dayMax);
+  const span = weekMax - weekMin;
+  if (span <= 0.01) {
+    return { leftPct: 0, widthPct: 100 };
+  }
+  const leftPct = Math.max(0, Math.min(100, ((lo - weekMin) / span) * 100));
+  const rawWidth = ((hi - lo) / span) * 100;
+  const widthPct = Math.max(8, Math.min(100 - leftPct, rawWidth));
+  return { leftPct, widthPct };
+}
+
+function extractCurrentExtras(data) {
+  if (!data) {
+    return { feelsLike: null, humidity: null, pressureHpa: null, windDirection: null, precipProb: null };
+  }
+  const cur = data.current || {};
+  const cw = data.current_weather || {};
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const feelsLike = num(cur.apparent_temperature) ?? num(cw.apparent_temperature);
+  const humidity = num(cur.relative_humidity_2m) ?? num(cw.relative_humidity_2m);
+  const pressureHpa = num(cur.surface_pressure) ?? num(cw.surface_pressure);
+  const windDirection = num(cw.winddirection) ?? num(cur.wind_direction_10m);
+  const precipProb = num(cur.precipitation_probability) ?? num(data.daily?.precipitation_probability_max?.[0]);
+  return { feelsLike, humidity, pressureHpa, windDirection, precipProb };
 }
 
 function computeCityClock(data) {
-  if (!data || typeof data.utc_offset_seconds !== 'number') return null;
+  if (!data || typeof data.utc_offset_seconds !== 'number' || !Number.isFinite(data.utc_offset_seconds)) {
+    return null;
+  }
   const now = new Date();
   const cityMs = now.getTime() + now.getTimezoneOffset() * 60000 + data.utc_offset_seconds * 1000;
   const d = new Date(cityMs);
@@ -128,4 +211,19 @@ function computeCityClock(data) {
   );
 }
 
-export { weathercodeToType, isNightHour, isCoordsLikeText, getHourlyTimeline, beaufortFromMs, convertTemp, convertWind, formatTemp, computeCityClock };
+export {
+  weathercodeToType,
+  isNightHour,
+  isCoordsLikeText,
+  getHourlyTimeline,
+  beaufortFromMs,
+  convertTemp,
+  convertWind,
+  formatTemp,
+  windDirectionKey,
+  hpaToMmHg,
+  computeWeeklyTempBounds,
+  computeDayRangeFractions,
+  extractCurrentExtras,
+  computeCityClock,
+};

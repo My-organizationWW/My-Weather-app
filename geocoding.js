@@ -4,6 +4,7 @@
 export const OFFLINE_RE = /unknownhost|resolve host|no address|network request failed|fetch failed|timed out|timeout|abort|econn|enotfound|no internet/i;
 export function isOfflineError(e) {
   if (!e) return false;
+  if (e.isExternalAbort) return false;
   if (e.kind === 'network') return true;
   return OFFLINE_RE.test(String(e.message || e));
 }
@@ -31,10 +32,13 @@ const REVERSE_STEP_MS = 8000;
 const REVERSE_TOTAL_MS = 12000;
 
 function withTimeout(promise, ms) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('reverse timeout')), ms)),
-  ]);
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('reverse timeout')), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    clearTimeout(timer);
+  });
 }
 
 export async function resolvePlaceName(latitude, longitude, lang, fetchFn) {
@@ -55,14 +59,18 @@ export async function resolvePlaceName(latitude, longitude, lang, fetchFn) {
       const p = data?.results?.length > 0 ? data.results[0] : null;
       const name = p?.name || p?.admin1;
       if (name) return { name, country: p?.country || '' };
-    } catch (e) {}
+    } catch (e) {
+      if (e?.isExternalAbort) throw e;
+    }
     try {
       const data = await fetchFn(
         `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=${lang || 'ru'}`
       );
       const name = data?.city || data?.locality || data?.principalSubdivision;
       if (name) return { name, country: data?.countryName || '' };
-    } catch (e) {}
+    } catch (e) {
+      if (e?.isExternalAbort) throw e;
+    }
     try {
       // Nominatim reverse: same host as the search fallback, reachable
       // everywhere the search is (proven by diagnostics on all networks).
@@ -74,7 +82,9 @@ export async function resolvePlaceName(latitude, longitude, lang, fetchFn) {
         addr.city || addr.town || addr.village || addr.hamlet || addr.municipality ||
         addr.suburb || addr.county || addr.state;
       if (name) return { name, country: addr.country || '' };
-    } catch (e) {}
+    } catch (e) {
+      if (e?.isExternalAbort) throw e;
+    }
     return null;
   })();
   // Total cap: whatever stalls inside, callers get null after 12s and
@@ -83,6 +93,7 @@ export async function resolvePlaceName(latitude, longitude, lang, fetchFn) {
   try {
     return await withTimeout(chain, REVERSE_TOTAL_MS);
   } catch (e) {
+    if (e?.isExternalAbort) throw e;
     return null;
   }
 }

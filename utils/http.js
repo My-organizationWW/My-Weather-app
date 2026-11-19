@@ -6,7 +6,10 @@
 //  - 429 and 5xx are retried with a short pause (Retry-After honoured, capped);
 //  - network failures and timeouts are NOT retried here: callers already have
 //    fallbacks and a circuit breaker, and a second 10s wait would only make a
-//    dead host feel slower.
+//    dead host feel slower;
+//  - optional external `signal` aborts immediately (both in-flight fetch and
+//    retry backoff) with `err.isExternalAbort = true`, so callers can ignore
+//    superseded requests without triggering error banners or circuit breakers.
 
 export class HttpError extends Error {
   constructor(status, url) {
@@ -18,6 +21,18 @@ export class HttpError extends Error {
   }
 }
 
+export function createAbortError(external = false) {
+  const err = new Error(external ? 'Aborted' : 'Timeout');
+  err.name = 'AbortError';
+  if (external) err.isExternalAbort = true;
+  else err.isTimeout = true;
+  return err;
+}
+
+export function isExternalAbortError(err) {
+  return Boolean(err && err.isExternalAbort === true);
+}
+
 export const isRetryableStatus = (status) => status === 429 || (status >= 500 && status <= 599);
 
 export function retryDelayMs(res, attempt, baseMs = 600, capMs = 3000) {
@@ -27,7 +42,26 @@ export function retryDelayMs(res, attempt, baseMs = 600, capMs = 3000) {
   return Math.min(baseMs * (attempt + 1), capMs);
 }
 
-const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const defaultSleep = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(createAbortError(true));
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = signal
+      ? () => {
+          clearTimeout(timer);
+          reject(createAbortError(true));
+        }
+      : null;
+    if (signal && onAbort) {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
 
 export async function fetchJsonWithRetry(url, options = {}) {
   const {
@@ -36,25 +70,61 @@ export async function fetchJsonWithRetry(url, options = {}) {
     fetchImpl = fetch,
     sleep = defaultSleep,
     baseDelayMs = 600,
+    signal,
+    headers,
   } = options;
+
+  if (signal?.aborted) {
+    throw createAbortError(true);
+  }
 
   for (let attempt = 0; ; attempt += 1) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    let externallyAborted = false;
+
+    const onExternalAbort = () => {
+      externallyAborted = true;
+      controller.abort();
+    };
+    if (signal) {
+      if (signal.aborted) {
+        throw createAbortError(true);
+      }
+      signal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
     try {
-      const res = await fetchImpl(url, { signal: controller.signal });
+      const init = headers ? { signal: controller.signal, headers } : { signal: controller.signal };
+      const res = await fetchImpl(url, init);
       if (!res.ok) {
         if (isRetryableStatus(res.status) && attempt < retries) {
           const delay = retryDelayMs(res, attempt, baseDelayMs);
           clearTimeout(timer);
-          await sleep(delay);
+          if (signal) signal.removeEventListener('abort', onExternalAbort);
+          await sleep(delay, signal);
+          if (signal?.aborted) throw createAbortError(true);
           continue;
         }
         throw new HttpError(res.status, url);
       }
       return await res.json();
+    } catch (e) {
+      if (externallyAborted || signal?.aborted) {
+        throw createAbortError(true);
+      }
+      if (timedOut && e && e.name === 'AbortError') {
+        e.isTimeout = true;
+      }
+      throw e;
     } finally {
       clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onExternalAbort);
     }
   }
 }
