@@ -57,11 +57,13 @@ export const FontSizeProvider = ({ children }) => {
   }, []);
 
   const setFontScale = useCallback(async (value) => {
-    setFontScaleState(value);
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+    const clamped = Math.max(0.8, Math.min(1.3, parsed));
+    setFontScaleState(clamped);
     try {
-      await AsyncStorage.setItem(FONT_SIZE_KEY, String(value));
-    } catch (e) {
-    }
+      await AsyncStorage.setItem(FONT_SIZE_KEY, String(clamped));
+    } catch (e) {}
   }, []);
 
   const fontSizeLevel = useMemo(() => {

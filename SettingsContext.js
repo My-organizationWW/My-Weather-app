@@ -4,6 +4,7 @@ import React, {
   useEffect,
   useContext,
   useCallback,
+  useMemo,
 } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -50,56 +51,45 @@ export const SettingsProvider = ({ children }) => {
     loadSettings();
   }, []);
 
-  const persistTempUnit = useCallback(
-    async (value) => {
-      setTempUnit(value);
-      if (loaded && TEMP_UNITS.includes(value)) {
-        try {
-          await AsyncStorage.setItem(TEMP_UNIT_KEY, value);
-        } catch (e) {
-        }
-      }
-    },
-    [loaded],
-  );
+  const persistTempUnit = useCallback(async (value) => {
+    if (!TEMP_UNITS.includes(value)) return;
+    setTempUnit(value);
+    try {
+      await AsyncStorage.setItem(TEMP_UNIT_KEY, value);
+    } catch (e) {}
+  }, []);
 
-  const persistWindUnit = useCallback(
-    async (value) => {
-      setWindUnit(value);
-      if (loaded && WIND_UNITS.includes(value)) {
-        try {
-          await AsyncStorage.setItem(WIND_UNIT_KEY, value);
-        } catch (e) {
-        }
-      }
-    },
-    [loaded],
-  );
+  const persistWindUnit = useCallback(async (value) => {
+    if (!WIND_UNITS.includes(value)) return;
+    setWindUnit(value);
+    try {
+      await AsyncStorage.setItem(WIND_UNIT_KEY, value);
+    } catch (e) {}
+  }, []);
 
-  const persistShowSourceBadge = useCallback(
-    async (value) => {
-      setShowSourceBadge(!!value);
-      if (loaded) {
-        try {
-          await AsyncStorage.setItem(SHOW_SOURCE_KEY, value ? 'true' : 'false');
-        } catch (e) {
-        }
-      }
-    },
-    [loaded],
+  const persistShowSourceBadge = useCallback(async (value) => {
+    const next = !!value;
+    setShowSourceBadge(next);
+    try {
+      await AsyncStorage.setItem(SHOW_SOURCE_KEY, next ? 'true' : 'false');
+    } catch (e) {}
+  }, []);
+
+  const value = useMemo(
+    () => ({
+      tempUnit,
+      windUnit,
+      setTempUnit: persistTempUnit,
+      setWindUnit: persistWindUnit,
+      showSourceBadge,
+      setShowSourceBadge: persistShowSourceBadge,
+      loaded,
+    }),
+    [tempUnit, windUnit, persistTempUnit, persistWindUnit, showSourceBadge, persistShowSourceBadge, loaded],
   );
 
   return (
-    <SettingsContext.Provider
-      value={{
-        tempUnit,
-        windUnit,
-        setTempUnit: persistTempUnit,
-        setWindUnit: persistWindUnit,
-        showSourceBadge,
-        setShowSourceBadge: persistShowSourceBadge,
-      }}
-    >
+    <SettingsContext.Provider value={value}>
       {children}
     </SettingsContext.Provider>
   );
