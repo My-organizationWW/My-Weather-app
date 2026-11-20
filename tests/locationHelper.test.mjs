@@ -82,3 +82,48 @@ test('returns unavailable and cleans up subscription when all location legs fail
   assert.deepEqual(res, { status: 'unavailable' });
   assert.equal(removed, true);
 });
+
+test('prompts to enable location services BEFORE starting single-shot timeout and bails immediately if user declines', async () => {
+  let watchCalled = 0;
+  let singleShotCalled = 0;
+  const declinedLocation = {
+    Accuracy: { Low: 2, Balanced: 3 },
+    getForegroundPermissionsAsync: async () => ({ status: 'granted' }),
+    hasServicesEnabledAsync: async () => false,
+    enableNetworkProviderAsync: async () => {
+      throw new Error('Location settings unsatisfied');
+    },
+    getCurrentPositionAsync: async () => { singleShotCalled++; return null; },
+    watchPositionAsync: async () => { watchCalled++; return { remove() {} }; },
+  };
+
+  const resDeclined = await acquireCurrentPosition(declinedLocation, { sleep: noSleep });
+  assert.deepEqual(resDeclined, { status: 'services_disabled' });
+  assert.equal(singleShotCalled, 0);
+  assert.equal(watchCalled, 0);
+
+  // Now simulate user spending 80ms in the system dialog and tapping OK:
+  // singleShotTimeoutMs is only 30ms, yet it must NOT expire during the 80ms dialog!
+  let enabled = false;
+  const acceptedLocation = {
+    Accuracy: { Low: 2, Balanced: 3 },
+    getForegroundPermissionsAsync: async () => ({ status: 'granted' }),
+    hasServicesEnabledAsync: async () => enabled,
+    enableNetworkProviderAsync: async () => {
+      await new Promise((r) => setTimeout(r, 80));
+      enabled = true;
+    },
+    getLastKnownPositionAsync: async () => null,
+    getCurrentPositionAsync: async () => ({
+      coords: { latitude: 55.75, longitude: 37.61, accuracy: 20 },
+    }),
+  };
+
+  const resAccepted = await acquireCurrentPosition(acceptedLocation, {
+    singleShotTimeoutMs: 30,
+    settleAfterGrantMs: 0,
+    sleep: noSleep,
+  });
+  assert.equal(resAccepted.status, 'granted');
+  assert.equal(resAccepted.position.coords.latitude, 55.75);
+});
