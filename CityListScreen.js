@@ -774,6 +774,8 @@ export default function CityListScreen() {
 
   // GEOLOCATION STREAM (top card). Uses getForegroundPermissionsAsync so
   // opening CityList never spams an OS permission dialog when previously denied.
+  // Fast path: recent cached OS fix (<3 min) resolves in <50ms instead of
+  // waiting for a cold GPS lock.
   const loadCurrentLocation = async () => {
     let timer;
     try {
@@ -782,25 +784,38 @@ export default function CityListScreen() {
         if (mountedRef.current) setCurrentLocation(null);
         return;
       }
-      const position = await Promise.race([
-        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('location timeout')), 12000);
-        }),
-      ]);
-      clearTimeout(timer);
-      if (!mountedRef.current) return;
+      let position = null;
+      try {
+        position = await Location.getLastKnownPositionAsync({ maxAge: 180000, requiredAccuracy: 2000 });
+      } catch (e) {}
+      if (!position) {
+        try {
+          position = await Promise.race([
+            Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error('location timeout')), 6000);
+            }),
+          ]);
+        } catch (e) {
+          position = await Location.getLastKnownPositionAsync().catch(() => null);
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      if (!position || !mountedRef.current) return;
       const { latitude, longitude } = position.coords;
       const currentLang = i18n.language || 'ru';
       const locFetch = makeCityFetchJson(refreshAbortRef.current?.signal, FETCH_TIMEOUT_MS, 1);
-      const enrichment = await fetchWeatherForCoords(latitude, longitude, locFetch);
+      const revFetch = makeCityFetchJson(refreshAbortRef.current?.signal, 4000, 0);
+      const [enrichment, resolved] = await Promise.all([
+        fetchWeatherForCoords(latitude, longitude, locFetch),
+        resolvePlaceName(latitude, longitude, currentLang, revFetch),
+      ]);
       if (!mountedRef.current) return;
       if (!enrichment) {
         setCurrentLocation(null);
         return;
       }
-      const resolved = await resolvePlaceName(latitude, longitude, currentLang, locFetch);
-      if (!mountedRef.current) return;
       setCurrentLocation({
         id: '__current_location__',
         name: resolved?.name ?? `${latitude.toFixed(2)}, ${longitude.toFixed(2)}`,
@@ -920,14 +935,21 @@ export default function CityListScreen() {
   const handleSelectCity = useCallback(async (cityName, latitude, longitude) => {
     try {
       await AsyncStorage.setItem(LAST_SELECTED_CITY_KEY, cityName);
-      const params = { selectedCity: cityName, ts: Date.now() };
+      // Use unified `city` key (same as WeatherPhenomenonFinder) so an older
+      // `city` param never shadows `selectedCity`, and pass `{ pop: true }`
+      // so React Navigation v7 returns to the EXISTING Tabs screen instead of
+      // pushing a duplicate Tabs instance onto the stack.
+      const params = { city: cityName, selectedCity: cityName, ts: Date.now() };
       if (typeof latitude === 'number' && typeof longitude === 'number' && Number.isFinite(latitude) && Number.isFinite(longitude)) {
         params.latitude = latitude;
         params.longitude = longitude;
+      } else {
+        params.latitude = undefined;
+        params.longitude = undefined;
       }
-      navigation.navigate('Tabs', { screen: 'weather', params });
+      navigation.navigate('Tabs', { screen: 'weather', params }, { pop: true });
     } catch (e) {
-      navigation.navigate('Tabs', { screen: 'weather' });
+      navigation.navigate('Tabs', { screen: 'weather' }, { pop: true });
     }
   }, [navigation]);
 

@@ -80,9 +80,9 @@ const saveCachedWeather = async (snapshot) => {
 const saveLastCity = async (name) => { try { await AsyncStorage.setItem(LAST_CITY_KEY, name); } catch (e) {} };
 const loadRememberCity = async () => { try { const v = await AsyncStorage.getItem(REMEMBER_CITY_ENABLED_KEY); return v === null ? true : v === 'true'; } catch (e) { return true; } };
 
-const makeFetchJson = (signal) => async (url) => {
+const makeFetchJson = (signal, timeoutMs = TIMEOUT_MS) => async (url) => {
   try {
-    return await fetchJsonWithRetry(url, { timeoutMs: TIMEOUT_MS, signal });
+    return await fetchJsonWithRetry(url, { timeoutMs, signal });
   } catch (e) {
     if (isExternalAbortError(e)) throw e;
     if (e?.isTimeout || (e && e.name === 'AbortError')) {
@@ -377,6 +377,7 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+    const hasInitialNavCity = Boolean(route.params?.city ?? route.params?.selectedCity);
     const init = async () => {
       // Read connection state + Cache-First storage keys in parallel for fast startup.
       const [netState, remember, saved, cached] = await Promise.all([
@@ -388,6 +389,13 @@ export default function App() {
       if (!active) return;
       setIsConnected(!!netState.isConnected);
       rememberRef.current = remember;
+
+      // If a city selection via navigation or user action already started
+      // before init() finished reading AsyncStorage, do NOT overwrite or
+      // abort it with the previous cached city.
+      if (hasInitialNavCity || requestSeqRef.current > 0) {
+        return;
+      }
 
       let hasCache = false;
       if (cached) {
@@ -543,29 +551,62 @@ export default function App() {
   // Scenario A: refresh by saved coordinates — pure Open-Meteo fetch,
   // never touches Location.*. Scenario B (geolocation) lives ONLY in
   // detectMyLocation(), called from the "my location" button / first launch.
+  // Weather renders as soon as fetchWeather finishes; reverseGeocode runs in
+  // parallel and updates the header name/country without blocking the forecast.
   const loadByCoords = async (lat, lon, silent = false, warningMsg = null) => {
     const { seq, signal } = beginRequest();
     const fetchJson = makeFetchJson(signal);
+    const reverseFetchJson = makeFetchJson(signal, 4000);
     if (!silent) setLoading(true);
     setError(warningMsg);
     setHostUnreachable(false);
     lastRequest.current = { type: 'coords', lat, lon };
+
+    let resolvedPlace = null;
+    const placePromise = reverseGeocode(lat, lon, reverseFetchJson)
+      .then((p) => {
+        resolvedPlace = p;
+        return p;
+      })
+      .catch(() => null);
+
     try {
-      const [place, data] = await Promise.all([
-        reverseGeocode(lat, lon, fetchJson),
-        fetchWeather(lat, lon, fetchJson),
-      ]);
+      const data = await fetchWeather(lat, lon, fetchJson);
       if (seq !== requestSeqRef.current) return;
+      const initialPlace = resolvedPlace || {
+        name: tr('currentLocation'),
+        country: '',
+        latitude: lat,
+        longitude: lon,
+      };
       const savedAt = Date.now();
-      const snapshot = { place, data, savedAt };
+      const snapshot = { place: initialPlace, data, savedAt };
       weatherRef.current = snapshot;
       setWeather(snapshot);
       setIsStale(false);
-      await saveCachedWeather({ place, data, query: place.name, savedAt });
-      if (rememberRef.current && place.name && place.name !== tr('currentLocation')) {
-        await saveLastCity(place.name);
-      }
       setCity('');
+      if (seq === requestSeqRef.current) setLoading(false);
+
+      // Finish resolving the human-readable name in the background without
+      // blocking weather display or keeping the caller awaiting.
+      if (resolvedPlace) {
+        await saveCachedWeather({ place: resolvedPlace, data, query: resolvedPlace.name, savedAt });
+        if (rememberRef.current && resolvedPlace.name && resolvedPlace.name !== tr('currentLocation')) {
+          await saveLastCity(resolvedPlace.name);
+        }
+      } else {
+        void placePromise.then(async (resolved) => {
+          if (seq !== requestSeqRef.current) return;
+          const finalPlace = resolved || initialPlace;
+          const finalSnapshot = { place: finalPlace, data, savedAt };
+          weatherRef.current = finalSnapshot;
+          setWeather(finalSnapshot);
+          await saveCachedWeather({ place: finalPlace, data, query: finalPlace.name, savedAt });
+          if (rememberRef.current && finalPlace.name && finalPlace.name !== tr('currentLocation')) {
+            await saveLastCity(finalPlace.name);
+          }
+        });
+      }
     } catch (e) {
       if (seq !== requestSeqRef.current || isExternalAbortError(e)) return;
       applyFetchError(e);
@@ -582,6 +623,7 @@ export default function App() {
     setLocating(true);
     setError(null);
     setHostUnreachable(false);
+    let gpsTimer;
     try {
       let { status } = await Location.getForegroundPermissionsAsync();
       if (status !== 'granted') {
@@ -592,15 +634,45 @@ export default function App() {
         setPermissionModalVisible(true);
         return;
       }
-      const position = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
+      // Fast path: reuse a recent OS location fix (<3 min, <=2km accuracy)
+      // so tapping GPS doesn't stall 15-40s indoors waiting for a cold fix.
+      let position = null;
+      try {
+        position = await Location.getLastKnownPositionAsync({
+          maxAge: 180000,
+          requiredAccuracy: 2000,
+        });
+      } catch (e) {}
+
+      if (!position) {
+        try {
+          position = await Promise.race([
+            Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.Balanced,
+            }),
+            new Promise((_, reject) => {
+              gpsTimer = setTimeout(() => reject(new Error('gps timeout')), 6000);
+            }),
+          ]);
+        } catch (e) {
+          position = await Location.getLastKnownPositionAsync().catch(() => null);
+        } finally {
+          clearTimeout(gpsTimer);
+        }
+      }
+
+      if (!position?.coords) {
+        setError(tr('locationFailed'));
+        return;
+      }
       const { latitude, longitude, accuracy } = position.coords;
       const approxWarning = accuracy && accuracy > 1000 ? tr('approximateLocation') : null;
+      setLocating(false);
       await loadByCoords(latitude, longitude, false, approxWarning);
     } catch (e) {
       setError(tr('locationFailed'));
     } finally {
+      clearTimeout(gpsTimer);
       setLocating(false);
     }
   };
@@ -1093,6 +1165,15 @@ export default function App() {
               </PressableScale>
             </View>
           )}
+          {/* Inline progress indicator when switching cities or locating over an existing view */}
+          {(loading || locating) && !!weather && (
+            <View style={styles.inlineStatusRow}>
+              <ActivityIndicator size="small" color={theme.accent} />
+              <Text style={styles.inlineStatusText}>
+                {locating ? tr('locating') : tr('loading')}
+              </Text>
+            </View>
+          )}
           {/* Cache-First: spinner only when there is nothing to show yet. */}
           {(loading || locating) && !weather && (
             <View style={styles.center}>
@@ -1496,6 +1577,18 @@ const buildStyles = (theme, fs, insets) => {
     bannerClose: { padding: fs.spacing * 0.25 },
     bannerCloseText: { color: theme.textSecondary, fontSize: fs.base, fontWeight: '700' },
     center: { alignItems: 'center', justifyContent: 'center', flex: 1 },
+    inlineStatusRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      marginBottom: fs.spacing * 0.5,
+    },
+    inlineStatusText: {
+      color: theme.textMuted,
+      fontSize: fs.small,
+      fontWeight: '500',
+    },
     skyIconWrap: { marginBottom: fs.spacing },
     loadingText: { color: theme.textMuted, marginTop: fs.spacing * 0.625, fontSize: fs.base },
     hint: { color: theme.textMuted, fontSize: fs.base, textAlign: 'center' },
