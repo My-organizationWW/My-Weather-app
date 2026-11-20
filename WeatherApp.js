@@ -38,6 +38,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { isOfflineError, isRegionLike, resolvePlaceName } from './geocoding';
 import { fetchForecast, searchCity } from './utils/weatherProviders';
 import { fetchJsonWithRetry, HttpError, isExternalAbortError } from './utils/http';
+import { acquireCurrentPosition } from './utils/locationHelper';
 import { WeatherIcon, SunAnimation, FogAnimation } from './components/weather/WeatherIcons';
 import {
   weathercodeToType,
@@ -623,56 +624,24 @@ export default function App() {
     setLocating(true);
     setError(null);
     setHostUnreachable(false);
-    let gpsTimer;
+    setDismissedMsg(null);
     try {
-      let { status } = await Location.getForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        const permission = await Location.requestForegroundPermissionsAsync();
-        status = permission.status;
-      }
-      if (status !== 'granted') {
+      const res = await acquireCurrentPosition(Location, { requestPermission: true });
+      if (res.status === 'denied') {
         setPermissionModalVisible(true);
         return;
       }
-      // Fast path: reuse a recent OS location fix (<3 min, <=2km accuracy)
-      // so tapping GPS doesn't stall 15-40s indoors waiting for a cold fix.
-      let position = null;
-      try {
-        position = await Location.getLastKnownPositionAsync({
-          maxAge: 180000,
-          requiredAccuracy: 2000,
-        });
-      } catch (e) {}
-
-      if (!position) {
-        try {
-          position = await Promise.race([
-            Location.getCurrentPositionAsync({
-              accuracy: Location.Accuracy.Balanced,
-            }),
-            new Promise((_, reject) => {
-              gpsTimer = setTimeout(() => reject(new Error('gps timeout')), 6000);
-            }),
-          ]);
-        } catch (e) {
-          position = await Location.getLastKnownPositionAsync().catch(() => null);
-        } finally {
-          clearTimeout(gpsTimer);
-        }
-      }
-
-      if (!position?.coords) {
+      if (res.status !== 'granted' || !res.position?.coords) {
         setError(tr('locationFailed'));
         return;
       }
-      const { latitude, longitude, accuracy } = position.coords;
+      const { latitude, longitude, accuracy } = res.position.coords;
       const approxWarning = accuracy && accuracy > 1000 ? tr('approximateLocation') : null;
       setLocating(false);
       await loadByCoords(latitude, longitude, false, approxWarning);
     } catch (e) {
       setError(tr('locationFailed'));
     } finally {
-      clearTimeout(gpsTimer);
       setLocating(false);
     }
   };
@@ -819,6 +788,12 @@ export default function App() {
   }, []);
   const retryConnection = async () => {
     if (retrying) return;
+    // If the visible banner is specifically a failed GPS attempt, "Retry"
+    // should retry geolocation rather than silently reloading the old city.
+    if (error === tr('locationFailed')) {
+      await detectMyLocation();
+      return;
+    }
     setRetrying(true);
     try {
       const state = await NetInfo.fetch().catch(() => ({ isConnected: true }));

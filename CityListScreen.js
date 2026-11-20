@@ -15,6 +15,7 @@ import * as Location from 'expo-location';
 import { isOfflineError, isRegionLike, resolvePlaceName } from './geocoding';
 import { fetchForecast, searchCity } from './utils/weatherProviders';
 import { fetchJsonWithRetry, isExternalAbortError } from './utils/http';
+import { acquireCurrentPosition } from './utils/locationHelper';
 import ConfirmDeleteModal from './ConfirmDeleteModal';
 import DraggableCityCard from './DraggableCityCard';
 import CurrentLocationCard from './CurrentLocationCard';
@@ -772,38 +773,20 @@ export default function CityListScreen() {
     }
   };
 
-  // GEOLOCATION STREAM (top card). Uses getForegroundPermissionsAsync so
-  // opening CityList never spams an OS permission dialog when previously denied.
-  // Fast path: recent cached OS fix (<3 min) resolves in <50ms instead of
-  // waiting for a cold GPS lock.
+  // GEOLOCATION STREAM (top card). Uses requestPermission: false so opening
+  // CityList never spams an OS permission dialog when previously denied.
   const loadCurrentLocation = async () => {
-    let timer;
     try {
-      const { status } = await Location.getForegroundPermissionsAsync();
-      if (status !== 'granted') {
+      const res = await acquireCurrentPosition(Location, {
+        requestPermission: false,
+        singleShotTimeoutMs: 5000,
+        watchTimeoutMs: 6000,
+      });
+      if (res.status !== 'granted' || !res.position?.coords || !mountedRef.current) {
         if (mountedRef.current) setCurrentLocation(null);
         return;
       }
-      let position = null;
-      try {
-        position = await Location.getLastKnownPositionAsync({ maxAge: 180000, requiredAccuracy: 2000 });
-      } catch (e) {}
-      if (!position) {
-        try {
-          position = await Promise.race([
-            Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
-            new Promise((_, reject) => {
-              timer = setTimeout(() => reject(new Error('location timeout')), 6000);
-            }),
-          ]);
-        } catch (e) {
-          position = await Location.getLastKnownPositionAsync().catch(() => null);
-        } finally {
-          clearTimeout(timer);
-        }
-      }
-      if (!position || !mountedRef.current) return;
-      const { latitude, longitude } = position.coords;
+      const { latitude, longitude } = res.position.coords;
       const currentLang = i18n.language || 'ru';
       const locFetch = makeCityFetchJson(refreshAbortRef.current?.signal, FETCH_TIMEOUT_MS, 1);
       const revFetch = makeCityFetchJson(refreshAbortRef.current?.signal, 4000, 0);
@@ -825,7 +808,6 @@ export default function CityListScreen() {
         ...enrichment,
       });
     } catch (e) {
-      clearTimeout(timer);
       if (mountedRef.current && !isExternalAbortError(e)) setCurrentLocation(null);
     }
   };
