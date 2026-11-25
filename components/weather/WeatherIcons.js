@@ -125,67 +125,151 @@ function RainLayer({ size, heavy }) {
   );
 }
 
+function SnowflakeCrystal({ size, color }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 16 16">
+      <G stroke={color} strokeWidth={1.35} strokeLinecap="round">
+        <Line x1={8} y1={1.5} x2={8} y2={14.5} />
+        <Line x1={2.37} y1={4.75} x2={13.63} y2={11.25} />
+        <Line x1={13.63} y1={4.75} x2={2.37} y2={11.25} />
+      </G>
+      <Circle cx={8} cy={8} r={1.6} fill={color} />
+    </Svg>
+  );
+}
+
+const SNOW_PRESETS_LARGE = [
+  // Foreground rotating 6-arm crystals
+  { left: 17, dia: 7.4, cycle: 2500, amp: 3.4, dir: 1, phase: 0.05, maxOp: 0.96, crystal: true, spin: 180 },
+  { left: 28, dia: 6.4, cycle: 2850, amp: 3.0, dir: -1, phase: 0.38, maxOp: 0.92, crystal: true, spin: -180 },
+  { left: 39, dia: 7.0, cycle: 2650, amp: 3.2, dir: 1, phase: 0.71, maxOp: 0.95, crystal: true, spin: 180 },
+  { left: 48, dia: 5.8, cycle: 3000, amp: 2.6, dir: -1, phase: 0.22, maxOp: 0.88, crystal: true, spin: -180 },
+  { left: 23, dia: 6.0, cycle: 3150, amp: 2.8, dir: 1, phase: 0.56, maxOp: 0.9, crystal: true, spin: 180 },
+  // Mid & background soft flakes (parallax depth)
+  { left: 14, dia: 3.0, cycle: 3400, amp: 2.2, dir: -1, phase: 0.84, maxOp: 0.65, crystal: false, spin: 0 },
+  { left: 21, dia: 3.6, cycle: 2300, amp: 2.5, dir: 1, phase: 0.16, maxOp: 0.8, crystal: false, spin: 0 },
+  { left: 33, dia: 2.8, cycle: 3600, amp: 2.0, dir: -1, phase: 0.49, maxOp: 0.6, crystal: false, spin: 0 },
+  { left: 36, dia: 3.8, cycle: 2400, amp: 2.8, dir: 1, phase: 0.91, maxOp: 0.85, crystal: false, spin: 0 },
+  { left: 44, dia: 2.8, cycle: 3500, amp: 2.1, dir: -1, phase: 0.31, maxOp: 0.62, crystal: false, spin: 0 },
+  { left: 50, dia: 3.4, cycle: 2700, amp: 2.4, dir: 1, phase: 0.64, maxOp: 0.78, crystal: false, spin: 0 },
+  { left: 26, dia: 2.6, cycle: 3800, amp: 1.8, dir: -1, phase: 0.0, maxOp: 0.55, crystal: false, spin: 0 },
+];
+
+const SNOW_PRESETS_SMALL = [
+  { left: 16, dia: 4.0, cycle: 2200, amp: 2.2, dir: 1, phase: 0.0, maxOp: 0.95, crystal: false, spin: 0 },
+  { left: 24, dia: 3.4, cycle: 2600, amp: 2.0, dir: -1, phase: 0.28, maxOp: 0.85, crystal: false, spin: 0 },
+  { left: 31, dia: 4.2, cycle: 2350, amp: 2.4, dir: 1, phase: 0.57, maxOp: 0.95, crystal: false, spin: 0 },
+  { left: 38, dia: 3.2, cycle: 2800, amp: 1.9, dir: -1, phase: 0.14, maxOp: 0.8, crystal: false, spin: 0 },
+  { left: 45, dia: 3.8, cycle: 2450, amp: 2.1, dir: 1, phase: 0.73, maxOp: 0.9, crystal: false, spin: 0 },
+  { left: 20, dia: 3.0, cycle: 2950, amp: 1.7, dir: -1, phase: 0.43, maxOp: 0.72, crystal: false, spin: 0 },
+  { left: 42, dia: 3.0, cycle: 2700, amp: 1.8, dir: 1, phase: 0.86, maxOp: 0.75, crystal: false, spin: 0 },
+];
+
 function SnowLayer({ size }) {
   const { theme } = useTheme();
   const scale = size / 64;
-  const fill = theme.mode === 'light' ? '#8fa4c9' : ICON_COLORS.snow;
+  const isLarge = size >= 52;
+  const fillPrimary = theme.mode === 'light' ? '#6c89bd' : ICON_COLORS.snow;
+  const fillSoft = theme.mode === 'light' ? '#95add6' : '#cfe2ff';
+
   const flakesRef = useRef(null);
   if (flakesRef.current === null) {
-    flakesRef.current = Array.from({ length: 10 }, (_, i) => ({
-      v: new Animated.Value(0),
-      left: 15 + ((i * 29) % 33),
-      dia: 3 + ((i * 7) % 7) * 0.5,
-      cycle: 1600 + ((i * 173) % 1300),
-      amp: 1.5 + (i % 3),
+    const presets = isLarge ? SNOW_PRESETS_LARGE : SNOW_PRESETS_SMALL;
+    flakesRef.current = presets.map((p) => ({
+      ...p,
+      v: new Animated.Value(p.phase),
     }));
   }
   const flakes = flakesRef.current;
+
   useEffect(() => {
-    const loops = flakes.map((f) =>
-      Animated.loop(
-        Animated.timing(f.v, {
-          toValue: 1,
-          duration: f.cycle,
-          easing: Easing.linear,
-          useNativeDriver: true,
-        })
-      )
-    );
-    loops.forEach((l) => l.start());
-    return () => loops.forEach((l) => l.stop());
+    let cancelled = false;
+    const activeAnims = [];
+
+    flakes.forEach((f) => {
+      const remaining = Math.max(80, Math.round((1 - f.phase) * f.cycle));
+      f.v.setValue(f.phase);
+
+      const startLoop = () => {
+        if (cancelled) return;
+        f.v.setValue(0);
+        const loop = Animated.loop(
+          Animated.timing(f.v, {
+            toValue: 1,
+            duration: f.cycle,
+            easing: Easing.linear,
+            useNativeDriver: true,
+          })
+        );
+        activeAnims.push(loop);
+        loop.start();
+      };
+
+      const firstPass = Animated.timing(f.v, {
+        toValue: 1,
+        duration: remaining,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      });
+      activeAnims.push(firstPass);
+      firstPass.start(({ finished }) => {
+        if (finished && !cancelled) startLoop();
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      activeAnims.forEach((a) => a.stop());
+      flakes.forEach((f) => f.v.stopAnimation());
+    };
   }, [flakes]);
+
   return (
     <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-      {flakes.map((f, i) => (
-        <Animated.View
-          key={i}
-          pointerEvents="none"
-          style={{
-            position: 'absolute',
-            left: f.left * scale,
-            top: 42 * scale,
-            width: Math.max(2, f.dia * scale),
-            height: Math.max(2, f.dia * scale),
-            borderRadius: Math.max(1, (f.dia * scale) / 2),
-            backgroundColor: fill,
-            opacity: 0.9,
-            transform: [
-              {
-                translateX: f.v.interpolate({
-                  inputRange: [0, 0.25, 0.5, 0.75, 1],
-                  outputRange: [0, f.amp * scale, 0, -f.amp * scale, 0],
-                }),
-              },
-              {
-                translateY: f.v.interpolate({
-                  inputRange: [0, 0.12, 0.82, 1],
-                  outputRange: [-8 * scale, -8 * scale, 24 * scale, 24 * scale],
-                }),
-              },
-            ],
-          }}
-        />
-      ))}
+      {flakes.map((f, i) => {
+        const flakeSize = Math.max(2, f.dia * scale);
+        const sway = f.amp * f.dir * scale;
+        const opacity = f.v.interpolate({
+          inputRange: [0, 0.14, 0.72, 1],
+          outputRange: [0, f.maxOp, f.maxOp, 0],
+        });
+        const translateX = f.v.interpolate({
+          inputRange: [0, 0.17, 0.33, 0.5, 0.67, 0.83, 1],
+          outputRange: [0, sway * 0.85, sway, 0, -sway * 0.85, -sway, 0],
+        });
+        const translateY = f.v.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0, 25 * scale],
+        });
+        const transforms = [{ translateX }, { translateY }];
+        if (f.crystal && f.spin) {
+          transforms.push({
+            rotate: f.v.interpolate({
+              inputRange: [0, 1],
+              outputRange: ['0deg', `${f.spin}deg`],
+            }),
+          });
+        }
+        return (
+          <Animated.View
+            key={i}
+            pointerEvents="none"
+            style={{
+              position: 'absolute',
+              left: f.left * scale - flakeSize / 2,
+              top: 37 * scale,
+              width: flakeSize,
+              height: flakeSize,
+              borderRadius: f.crystal ? 0 : flakeSize / 2,
+              backgroundColor: f.crystal ? 'transparent' : (f.maxOp > 0.75 ? fillPrimary : fillSoft),
+              opacity,
+              transform: transforms,
+            }}
+          >
+            {f.crystal && <SnowflakeCrystal size={flakeSize} color={fillPrimary} />}
+          </Animated.View>
+        );
+      })}
     </View>
   );
 }
@@ -606,7 +690,12 @@ const WeatherIcon = React.memo(function WeatherIcon({ type = 'clear', isNight = 
     }
     driftingCloud = { fill: ICON_COLORS.cloudDark, offsetX: 4, offsetY: 8, s: 0.85 };
   } else if (type === 'snow') {
-    content = <CloudShape y={-2} fill={ICON_COLORS.cloudDark} />;
+    if (size >= 52) {
+      content = null;
+      driftingCloud = { fill: ICON_COLORS.cloudDark, offsetX: 0, offsetY: -2, s: 1 };
+    } else {
+      content = <CloudShape y={-2} fill={ICON_COLORS.cloudDark} />;
+    }
   } else {
     content = (
       <CloudShape y={-2} fill={type === 'showers' ? ICON_COLORS.cloudDark : ICON_COLORS.cloudLight} />

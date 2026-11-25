@@ -129,6 +129,7 @@
   "cachedAt": "Saved data as of {{time}}",
   "hourlyForecast": "Hourly forecast",
   "now": "Now",
+  "today": "Today",
   "sunrise": "Sunrise",
   "sunset": "Sunset",
   "coordsCopied": "Coordinates copied",

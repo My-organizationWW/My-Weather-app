@@ -472,16 +472,16 @@ export const getWeatherTheme = (code, isNight) => {
       iconColor: '#7dd3fc',
     };
   }
-  // 5. snow (Снег): морозный льдисто-голубой (#3b82f6 → #60a5fa днём, #1e3a5f → #2563eb ночью)
-  if (c <= 77) {
+  // 5. snow (Снег, вкл. WMO 85–86 снежные ливни): морозный льдисто-голубой
+  if (c <= 77 || (c >= 85 && c <= 86)) {
     return {
       colors: isNight ? ['#1e3a5f', '#2563eb'] : ['#3b82f6', '#60a5fa'],
       icon: 'snow',
       iconColor: '#f0f9ff',
     };
   }
-  // 6. showers (Ливень): штормовой кобальт с цианом (#1e3a8a → #0369a1 днём, #0f172a → #164e63 ночью)
-  if (c <= 86) {
+  // 6. showers (Ливень, WMO 80–82): штормовой кобальт с цианом
+  if (c <= 82) {
     return {
       colors: isNight ? ['#0f172a', '#164e63'] : ['#1e3a8a', '#0369a1'],
       icon: 'rainy',
@@ -675,7 +675,7 @@ function WeatherConditionIcon({ code, isNight }) {
     return <RainConditionIcon />;
   }
   // 5. Snow (Снег): снежинка медленно вращается
-  if (c <= 77) {
+  if (c <= 77 || (c >= 85 && c <= 86)) {
     return (
       <AnimatedWeatherIcon
         name="snow"
@@ -686,8 +686,8 @@ function WeatherConditionIcon({ code, isNight }) {
       />
     );
   }
-  // 6. Showers (Ливень)
-  if (c <= 86) {
+  // 6. Showers (Ливень, WMO 80–82)
+  if (c <= 82) {
     return <RainConditionIcon />;
   }
   // 7. Thunder (Гроза): редкие вспышки

@@ -22,6 +22,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
 import ScreenWrapper from './ScreenWrapper';
 import PressableScale from './components/PressableScale';
 import FadeSlideIn from './components/FadeSlideIn';
@@ -52,6 +53,8 @@ import {
   hpaToMmHg,
   computeWeeklyTempBounds,
   computeDayRangeFractions,
+  computeTempRangeColors,
+  computeCurrentTempPct,
   extractCurrentExtras,
   computeCityClock,
 } from './utils/weatherFormat';
@@ -956,7 +959,8 @@ export default function App() {
     if (code <= 48) return tr('condition.fog');
     if (code <= 67) return tr('condition.rain');
     if (code <= 77) return tr('condition.snow');
-    if (code <= 86) return tr('condition.showers');
+    if (code <= 82) return tr('condition.showers');
+    if (code <= 86) return tr('condition.snow');
     return tr('condition.thunder');
   };
   if (!themeLoaded || !fs) {
@@ -1303,9 +1307,25 @@ export default function App() {
                 const range = weeklyBounds
                   ? computeDayRangeFractions(dayMin, dayMax, weeklyBounds.min, weeklyBounds.max)
                   : null;
+                const barColors = computeTempRangeColors(dayMin, dayMax);
+                const currentDotPct = i === 0 && weeklyBounds
+                  ? computeCurrentTempPct(
+                      weather.data.current_weather?.temperature,
+                      weeklyBounds.min,
+                      weeklyBounds.max,
+                      range
+                    )
+                  : null;
                 return (
                   <View key={day} style={styles.forecastRow}>
-                    <Text style={styles.forecastDay} numberOfLines={1}>{formatDay(day)}</Text>
+                    <Text
+                      style={[styles.forecastDay, i === 0 && styles.forecastDayToday]}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.85}
+                    >
+                      {i === 0 ? tr('today') : formatDay(day)}
+                    </Text>
                     <View style={styles.forecastIconCell}>
                       <WeatherIcon
                         type={weathercodeToType(weather.data.daily.weathercode?.[i])}
@@ -1316,18 +1336,35 @@ export default function App() {
                         <Text style={styles.forecastPrecip}>{Math.round(dayProb)}%</Text>
                       ) : null}
                     </View>
+                    <Text style={styles.forecastTempMin} numberOfLines={1}>
+                      {formatTemp(dayMin, tempUnit)}
+                    </Text>
                     {range && (
-                      <View style={styles.rangeBarTrack}>
-                        <View
-                          style={[
-                            styles.rangeBarFill,
-                            { left: `${range.leftPct}%`, width: `${range.widthPct}%` },
-                          ]}
-                        />
+                      <View style={styles.rangeBarWrap}>
+                        <View style={styles.rangeBarTrack}>
+                          <LinearGradient
+                            colors={barColors}
+                            start={{ x: 0, y: 0.5 }}
+                            end={{ x: 1, y: 0.5 }}
+                            style={[
+                              styles.rangeBarFill,
+                              { left: `${range.leftPct}%`, width: `${range.widthPct}%` },
+                            ]}
+                          />
+                        </View>
+                        {currentDotPct !== null && (
+                          <View
+                            pointerEvents="none"
+                            style={[
+                              styles.rangeCurrentDot,
+                              { left: `${currentDotPct}%` },
+                            ]}
+                          />
+                        )}
                       </View>
                     )}
-                    <Text style={styles.forecastTemp} numberOfLines={1}>
-                      {formatTemp(dayMin, tempUnit)} / {formatTemp(dayMax, tempUnit)}
+                    <Text style={styles.forecastTempMax} numberOfLines={1}>
+                      {formatTemp(dayMax, tempUnit)}
                     </Text>
                   </View>
                 );
@@ -1459,9 +1496,9 @@ const buildStyles = (theme, fs, insets) => {
     splashIconWrap: { marginBottom: fs.spacing },
     splashText: { color: theme.textSecondary, fontSize: fs.small },
     container: { flex: 1, position: 'relative', paddingHorizontal: fs.spacing },
-    menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: insets.top + 52, paddingRight: 16 },
-    dropdownMenu: { minWidth: 220, borderRadius: 16, borderWidth: 1, paddingVertical: 6, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
-    menuItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 18 },
+    menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: Math.max(insets.top, 8) + 4, paddingRight: fs.spacing },
+    dropdownMenu: { minWidth: 220, borderRadius: 16, borderWidth: 1, paddingVertical: 4, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
+    menuItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, paddingHorizontal: 18 },
     menuItemText: { fontSize: fs.base, fontWeight: '600' },
     menuDivider: { height: 1, width: '100%', marginVertical: 2 },
     searchBarContainer: {
@@ -1608,28 +1645,61 @@ const buildStyles = (theme, fs, insets) => {
       paddingHorizontal: fs.spacing * 0.75,
       paddingVertical: fs.spacing * 0.6,
       marginBottom: fs.spacing * 0.375,
-      gap: fs.spacing * 0.5,
+      gap: fs.spacing * 0.45,
     },
-    forecastDay: { color: theme.textSecondary, fontSize: fs.base * 0.92, width: fs.spacing * 4.5, flexShrink: 0, textAlign: 'left' },
-    forecastIconCell: { width: 38, alignItems: 'center', justifyContent: 'center' },
+    forecastDay: { color: theme.textSecondary, fontSize: fs.base * 0.92, width: fs.spacing * 4.6, flexShrink: 0, textAlign: 'left' },
+    forecastDayToday: { color: theme.text, fontWeight: '700' },
+    forecastIconCell: { width: 36, alignItems: 'center', justifyContent: 'center' },
     forecastPrecip: { color: theme.accent, fontSize: Math.max(10, fs.small * 0.8), fontWeight: '700', marginTop: -2 },
-    rangeBarTrack: {
+    forecastTempMin: {
+      color: theme.textSecondary,
+      fontSize: fs.base * 0.9,
+      fontWeight: '600',
+      minWidth: 34,
+      textAlign: 'right',
+      fontVariant: ['tabular-nums'],
+    },
+    forecastTempMax: {
+      color: theme.text,
+      fontSize: fs.base * 0.92,
+      fontWeight: '700',
+      minWidth: 34,
+      textAlign: 'right',
+      fontVariant: ['tabular-nums'],
+    },
+    rangeBarWrap: {
       flex: 1,
-      height: 5,
+      height: 12,
+      justifyContent: 'center',
+      position: 'relative',
+      minWidth: 44,
+    },
+    rangeBarTrack: {
+      width: '100%',
+      height: 6,
       borderRadius: 3,
       backgroundColor: theme.border,
       overflow: 'hidden',
       position: 'relative',
-      minWidth: 36,
     },
     rangeBarFill: {
       position: 'absolute',
       top: 0,
       bottom: 0,
       borderRadius: 3,
-      backgroundColor: theme.accent,
     },
-    forecastTemp: { color: theme.text, fontSize: fs.base * 0.92, fontWeight: '600', minWidth: 74, textAlign: 'right', fontVariant: ['tabular-nums'] },
+    rangeCurrentDot: {
+      position: 'absolute',
+      top: 1,
+      width: 10,
+      height: 10,
+      borderRadius: 5,
+      marginLeft: -5,
+      backgroundColor: '#ffffff',
+      borderWidth: 2,
+      borderColor: theme.surfaceAlt,
+      elevation: 2,
+    },
     hourlyRow: { gap: fs.spacing * 0.5, paddingBottom: fs.spacing * 0.25 },
     hourlyCard: { backgroundColor: theme.surfaceAlt, borderRadius: 12, paddingHorizontal: fs.spacing * 0.625, paddingVertical: fs.spacing * 0.5, alignItems: 'center', gap: fs.spacing * 0.2, minWidth: fs.spacing * 3.75 },
     hourlyTime: { color: theme.textSecondary, fontSize: fs.small * 0.92, fontVariant: ['tabular-nums'] },

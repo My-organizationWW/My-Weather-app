@@ -14,6 +14,9 @@ import {
   hpaToMmHg,
   computeWeeklyTempBounds,
   computeDayRangeFractions,
+  tempToHexColor,
+  computeTempRangeColors,
+  computeCurrentTempPct,
   extractCurrentExtras,
 } from '../utils/weatherFormat.js';
 
@@ -24,6 +27,9 @@ test('weathercodeToType maps WMO codes to icon buckets', () => {
   assert.equal(weathercodeToType(63), 'rain');
   assert.equal(weathercodeToType(73), 'snow');
   assert.equal(weathercodeToType(81), 'showers');
+  assert.equal(weathercodeToType(82), 'showers');
+  assert.equal(weathercodeToType(85), 'snow');
+  assert.equal(weathercodeToType(86), 'snow');
   assert.equal(weathercodeToType(95), 'thunder');
 });
 
@@ -114,6 +120,28 @@ test('getHourlyTimeline starts at the current hour of the city and interleaves s
   assert.deepEqual([...times].sort(), times, 'items are sorted by time');
 });
 
+test('getHourlyTimeline syncs the "Now" slot with current_weather so hero and hourly agree', () => {
+  const now = new Date();
+  const offset = -now.getTimezoneOffset() * 60;
+  const cityNow = new Date(now.getTime() + now.getTimezoneOffset() * 60000 + offset * 1000);
+  const hours = Array.from({ length: 6 }, (_, i) => localIsoHour(new Date(cityNow.getTime() + i * 3600000)));
+  const data = {
+    utc_offset_seconds: offset,
+    current_weather: { temperature: 0, weathercode: 85 },
+    hourly: {
+      time: hours,
+      temperature_2m: [1, 0, -1, -1, -2, -2],
+      weathercode: [71, 85, 71, 85, 2, 2],
+    },
+  };
+  const items = getHourlyTimeline(data, 6);
+  assert.equal(items[0].temp, 0);
+  assert.equal(items[0].code, 85);
+  assert.equal(weathercodeToType(items[0].code), 'snow');
+  assert.equal(items[1].temp, 0);
+  assert.equal(items[1].code, 85);
+});
+
 test('null and NaN inputs are formatted safely without fake 0° or 32°', () => {
   assert.equal(convertTemp(null, 'C'), null);
   assert.equal(convertTemp(undefined, 'F'), null);
@@ -153,6 +181,17 @@ test('weekly temperature bounds and range fractions', () => {
 
   const flat = computeDayRangeFractions(12, 12, 12, 12);
   assert.deepEqual(flat, { leftPct: 0, widthPct: 100 });
+
+  assert.equal(tempToHexColor(-25), 'rgb(59,130,246)');
+  assert.equal(tempToHexColor(40), 'rgb(239,68,68)');
+  const [cLo, cHi] = computeTempRangeColors(-20, 25);
+  assert.equal(cLo, 'rgb(59,130,246)');
+  assert.equal(cHi, 'rgb(251,146,60)');
+
+  assert.equal(computeCurrentTempPct(15, 5, 25, frac), 50);
+  assert.equal(computeCurrentTempPct(0, 5, 25, frac), 25, 'clamped to day min');
+  assert.equal(computeCurrentTempPct(30, 5, 25, frac), 75, 'clamped to day max');
+  assert.equal(computeCurrentTempPct(null, 5, 25, frac), null);
 
   assert.equal(computeDayRangeFractions(null, 20, 5, 25), null);
 });

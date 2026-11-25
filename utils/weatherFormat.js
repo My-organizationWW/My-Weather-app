@@ -9,7 +9,8 @@ function weathercodeToType(code) {
   if (code <= 48) return 'fog';
   if (code <= 67) return 'rain';
   if (code <= 77) return 'snow';
-  if (code <= 86) return 'showers';
+  if (code <= 82) return 'showers';
+  if (code <= 86) return 'snow';
   return 'thunder';
 }
 
@@ -67,11 +68,20 @@ function getHourlyTimeline(data, count = 24) {
   const items = [];
   for (let k = startIdx; k < endIndex; k++) {
     const rawProb = data.hourly.precipitation_probability?.[k];
+    const isNowSlot = k === startIdx && data.current_weather;
+    const temp =
+      isNowSlot && typeof data.current_weather.temperature === 'number' && Number.isFinite(data.current_weather.temperature)
+        ? data.current_weather.temperature
+        : data.hourly.temperature_2m?.[k];
+    const code =
+      isNowSlot && typeof data.current_weather.weathercode === 'number' && Number.isFinite(data.current_weather.weathercode)
+        ? data.current_weather.weathercode
+        : data.hourly.weathercode?.[k];
     items.push({
       type: 'hour',
       time: data.hourly.time[k],
-      temp: data.hourly.temperature_2m?.[k],
-      code: data.hourly.weathercode?.[k],
+      temp,
+      code,
       precipProb: typeof rawProb === 'number' && Number.isFinite(rawProb) ? Math.round(rawProb) : null,
     });
   }
@@ -211,19 +221,81 @@ function computeCityClock(data) {
   );
 }
 
+const TEMP_COLOR_STOPS = [
+  [-20, [59, 130, 246]],   // deep frost blue (#3b82f6)
+  [-5, [56, 189, 248]],    // icy sky (#38bdf8)
+  [2, [34, 211, 238]],     // cool cyan (#22d3ee)
+  [10, [52, 211, 153]],    // mild mint (#34d399)
+  [18, [250, 204, 21]],    // warm yellow (#facc15)
+  [25, [251, 146, 60]],    // hot orange (#fb923c)
+  [34, [239, 68, 68]],     // scorching red (#ef4444)
+];
+
+function tempToHexColor(celsius) {
+  if (typeof celsius !== 'number' || !Number.isFinite(celsius)) return '#38bdf8';
+  const stops = TEMP_COLOR_STOPS;
+  if (celsius <= stops[0][0]) {
+    const [r, g, b] = stops[0][1];
+    return `rgb(${r},${g},${b})`;
+  }
+  const last = stops[stops.length - 1];
+  if (celsius >= last[0]) {
+    const [r, g, b] = last[1];
+    return `rgb(${r},${g},${b})`;
+  }
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [t0, c0] = stops[i];
+    const [t1, c1] = stops[i + 1];
+    if (celsius >= t0 && celsius <= t1) {
+      const f = (celsius - t0) / (t1 - t0);
+      const r = Math.round(c0[0] + (c1[0] - c0[0]) * f);
+      const g = Math.round(c0[1] + (c1[1] - c0[1]) * f);
+      const b = Math.round(c0[2] + (c1[2] - c0[2]) * f);
+      return `rgb(${r},${g},${b})`;
+    }
+  }
+  return '#38bdf8';
+}
+
+function computeTempRangeColors(dayMin, dayMax) {
+  const lo = typeof dayMin === 'number' && Number.isFinite(dayMin) ? dayMin : 0;
+  const hi = typeof dayMax === 'number' && Number.isFinite(dayMax) ? dayMax : lo;
+  return [tempToHexColor(Math.min(lo, hi)), tempToHexColor(Math.max(lo, hi))];
+}
+
+function computeCurrentTempPct(currentTemp, weekMin, weekMax, range) {
+  if (
+    !range ||
+    typeof currentTemp !== 'number' || !Number.isFinite(currentTemp) ||
+    typeof weekMin !== 'number' || !Number.isFinite(weekMin) ||
+    typeof weekMax !== 'number' || !Number.isFinite(weekMax)
+  ) {
+    return null;
+  }
+  const span = weekMax - weekMin;
+  if (span <= 0.01) return 50;
+  const raw = ((currentTemp - weekMin) / span) * 100;
+  const lo = range.leftPct;
+  const hi = Math.min(100, range.leftPct + range.widthPct);
+  return Math.max(lo, Math.min(hi, raw));
+}
+
 export {
   weathercodeToType,
   isNightHour,
   isCoordsLikeText,
   getHourlyTimeline,
   beaufortFromMs,
-  convertTemp,
   convertWind,
+  convertTemp,
   formatTemp,
   windDirectionKey,
   hpaToMmHg,
   computeWeeklyTempBounds,
   computeDayRangeFractions,
+  tempToHexColor,
+  computeTempRangeColors,
+  computeCurrentTempPct,
   extractCurrentExtras,
   computeCityClock,
 };
