@@ -291,6 +291,17 @@ export default function App() {
     }).start(() => setMenuVisible(false));
   }, [menuAnim]);
 
+  const dismissMenuAndNavigate = useCallback((action) => {
+    menuAnim.stopAnimation();
+    menuAnim.setValue(0);
+    setMenuVisible(false);
+    // Let Android tear down the native Modal window cleanly on this frame
+    // before NativeStack starts slide_from_right, eliminating mid-slide jank.
+    requestAnimationFrame(() => {
+      action();
+    });
+  }, [menuAnim]);
+
   const menuScale = useMemo(
     () => menuAnim.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] }),
     [menuAnim],
@@ -998,8 +1009,7 @@ export default function App() {
                     style={styles.menuItem}
                     scaleTo={0.98}
                     onPress={() => {
-                      closeMenu();
-                      navigation.navigate('CityList');
+                      dismissMenuAndNavigate(() => navigation.navigate('CityList'));
                     }}
                   >
                     <Text style={[styles.menuItemText, { color: theme.text }]} numberOfLines={1} ellipsizeMode="tail">{tr('cities.title')}</Text>
@@ -1009,8 +1019,7 @@ export default function App() {
                     style={styles.menuItem}
                     scaleTo={0.98}
                     onPress={() => {
-                      closeMenu();
-                      openSettings();
+                      dismissMenuAndNavigate(() => openSettings());
                     }}
                   >
                     <Text style={[styles.menuItemText, { color: theme.text }]} numberOfLines={1} ellipsizeMode="tail">{tr('settings')}</Text>

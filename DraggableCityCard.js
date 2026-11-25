@@ -12,11 +12,11 @@ import Animated, {
   useReducedMotion,
   Easing,
   runOnJS,
-  FadeIn,
 } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Defs, RadialGradient, Stop, Rect } from 'react-native-svg';
+import FadeSlideIn from './components/FadeSlideIn';
 import { saveDragTrace } from './utils/dragTrace';
 import { convertTemp } from './utils/weatherFormat';
 
@@ -395,9 +395,9 @@ const DraggableCityCard = React.memo(function DraggableCityCard({
                 onPress={() => onSelectToggle(safeItem.id, safeItem.name, index)}
               >
                 {isSelected && (
-                  <Animated.View entering={FadeIn.duration(150)}>
+                  <FadeSlideIn duration={150} distance={0}>
                     <Ionicons name="checkmark" size={16} color="#FFFFFF" />
-                  </Animated.View>
+                  </FadeSlideIn>
                 )}
               </Pressable>
             </Animated.View>

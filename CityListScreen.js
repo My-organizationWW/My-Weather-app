@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { View, Text, TextInput, FlatList, Alert, StatusBar, RefreshControl, StyleSheet, Animated as RNAnimated } from 'react-native';
-import Animated, { useSharedValue, useAnimatedStyle, useAnimatedReaction, withTiming, withSpring, FadeInUp, Easing } from 'react-native-reanimated';
+import Animated, { useSharedValue, useAnimatedStyle, useAnimatedReaction, withTiming, withSpring, Easing } from 'react-native-reanimated';
 import ScreenWrapper from './ScreenWrapper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,6 +20,7 @@ import ConfirmDeleteModal from './ConfirmDeleteModal';
 import DraggableCityCard from './DraggableCityCard';
 import CurrentLocationCard from './CurrentLocationCard';
 import PressableScale from './components/PressableScale';
+import FadeSlideIn from './components/FadeSlideIn';
 import { getPluralSelectedText } from './utils/plural';
 
 const SAVED_CITIES_KEY = 'saved_cities_list';
@@ -1124,14 +1125,7 @@ export default function CityListScreen() {
           <SkeletonCard theme={theme} fs={fs} />
         </View>
       ) : (
-        <Animated.View
-          entering={
-            FadeInUp.duration(300)
-              .easing(Easing.out(Easing.quad))
-              .withInitialValues({ opacity: 0, transform: [{ translateY: 12 }] })
-          }
-          style={{ flex: 1 }}
-        >
+        <FadeSlideIn duration={260} distance={12} style={{ flex: 1 }}>
           <DragCellContext.Provider value={dragCellValue}>
           <FlatList
             data={renderList}
@@ -1176,7 +1170,7 @@ export default function CityListScreen() {
             }
           />
           </DragCellContext.Provider>
-        </Animated.View>
+        </FadeSlideIn>
       )}
 
       {/* Persistent delete bar: mounted always, shown/hidden by shared value
@@ -1199,13 +1193,15 @@ export default function CityListScreen() {
         </PressableScale>
       </Animated.View>
 
-      <ConfirmDeleteModal
-        visible={deleteTarget !== null}
-        cityName={deleteTarget?.name}
-        count={deleteTarget?.count || selectedCities.size}
-        onCancel={handleCancelDelete}
-        onConfirm={handleConfirmDelete}
-      />
+      {deleteTarget !== null && (
+        <ConfirmDeleteModal
+          visible={true}
+          cityName={deleteTarget?.name}
+          count={deleteTarget?.count || selectedCities.size}
+          onCancel={handleCancelDelete}
+          onConfirm={handleConfirmDelete}
+        />
+      )}
     </ScreenWrapper>
   );
 }

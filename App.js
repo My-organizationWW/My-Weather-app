@@ -78,6 +78,7 @@ function AppMain() {
                       screenOptions={{
                         headerShown: false,
                         animation: 'slide_from_right',
+                        contentStyle: { backgroundColor: theme.background },
                         // Suspend (don't detach) the outgoing screen: it
                         // keeps its last frame behind the entering one.
                         // NOTE: detachInactiveScreens does not exist in the
@@ -95,7 +96,7 @@ function AppMain() {
                       <Stack.Screen
                         name="CityList"
                         component={CityListScreen}
-                        options={{ animation: 'slide_from_right' }}
+                        options={{ animation: 'slide_from_right', freezeOnBlur: false }}
                       />
                       <Stack.Screen
                         name="NetDiag"
