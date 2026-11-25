@@ -34,16 +34,19 @@ export const ThemeProvider = ({ children }) => {
   }, []);
 
   const setThemeMode = useCallback(async (value) => {
+    const next = THEME_MODES.some((m) => m.value === value) ? value : 'author';
+    themeOverlayOpacity.stopAnimation();
     Animated.timing(themeOverlayOpacity, {
       toValue: 0.9,
       duration: 150,
       easing: Easing.inOut(Easing.quad),
       useNativeDriver: true,
-    }).start(() => {
-      setThemeModeState(value);
-      try {
-        AsyncStorage.setItem(APP_THEME_KEY, value);
-      } catch (e) {
+    }).start(({ finished }) => {
+      setThemeModeState(next);
+      AsyncStorage.setItem(APP_THEME_KEY, next).catch(() => {});
+      if (!finished) {
+        themeOverlayOpacity.setValue(1);
+        return;
       }
       Animated.timing(themeOverlayOpacity, {
         toValue: 1,
@@ -56,8 +59,13 @@ export const ThemeProvider = ({ children }) => {
 
   const theme = useMemo(() => resolveTheme(themeMode), [themeMode]);
 
+  const value = useMemo(
+    () => ({ theme, setThemeMode, themeMode, loaded, themeOverlayOpacity }),
+    [theme, setThemeMode, themeMode, loaded, themeOverlayOpacity],
+  );
+
   return (
-    <ThemeContext.Provider value={{ theme, setThemeMode, themeMode, loaded, themeOverlayOpacity }}>
+    <ThemeContext.Provider value={value}>
       {children}
     </ThemeContext.Provider>
   );

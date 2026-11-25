@@ -1,6 +1,7 @@
 import React, { Component } from 'react';
-import { View, Text } from 'react-native';
+import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { logCrash } from '../utils/crashLogger';
+import i18n from '../i18n';
 
 class GlobalErrorBoundary extends Component {
   constructor(props) {
@@ -9,38 +10,51 @@ class GlobalErrorBoundary extends Component {
   }
 
   static getDerivedStateFromError(error) {
-    // Update state so the next render will show the fallback UI.
     return { hasError: true, error };
   }
 
   componentDidCatch(error, errorInfo) {
-    // Log the crash to file BEFORE rendering fallback
     const appState = this._getAppState();
     logCrash(error, errorInfo, appState);
-
-    // Store errorInfo for potential later use
     this.setState({ errorInfo });
   }
 
   _getAppState() {
-    // Attempt to gather relevant app state for crash context
-    // This is a simplified version - in a real app, you'd access context providers
-    const state = {
+    return {
       theme: 'unknown',
-      language: 'unknown',
+      language: i18n?.language || 'unknown',
       citiesCount: 0,
       selectedCity: 'none',
     };
-    return state;
   }
+
+  handleRecover = () => {
+    this.setState({ hasError: false, error: null, errorInfo: null });
+  };
 
   render() {
     if (this.state.hasError) {
-      // Fallback UI shown after crash is logged
+      const tr = (key, fallback) => {
+        try {
+          const val = i18n.t(key);
+          return val && val !== key ? val : fallback;
+        } catch {
+          return fallback;
+        }
+      };
       return (
         <View style={styles.fallbackContainer}>
-          <Text style={styles.fallbackText}>Что-то пошло не так</Text>
-          <Text style={styles.fallbackSubText}>Попробуйте перезапустить приложение</Text>
+          <Text style={styles.fallbackText}>
+            {tr('errorBoundaryTitle', 'Что-то пошло не так')}
+          </Text>
+          <Text style={styles.fallbackSubText}>
+            {tr('errorBoundarySubtitle', 'Попробуйте восстановить экран или перезапустить приложение.')}
+          </Text>
+          <Pressable style={styles.recoverBtn} onPress={this.handleRecover}>
+            <Text style={styles.recoverBtnText}>
+              {tr('errorBoundaryRecover', 'Попробовать снова')}
+            </Text>
+          </Pressable>
         </View>
       );
     }
@@ -49,24 +63,39 @@ class GlobalErrorBoundary extends Component {
   }
 }
 
-const styles = {
+const styles = StyleSheet.create({
   fallbackContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
-    backgroundColor: '#fff',
+    padding: 24,
+    backgroundColor: '#1c2333',
   },
   fallbackText: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#dc2626',
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#FF453A',
     marginBottom: 10,
+    textAlign: 'center',
   },
   fallbackSubText: {
-    fontSize: 14,
-    color: '#6b7280',
+    fontSize: 15,
+    color: '#aab3cc',
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 20,
   },
-};
+  recoverBtn: {
+    backgroundColor: '#4a90d9',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+  },
+  recoverBtnText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+});
 
 export default GlobalErrorBoundary;

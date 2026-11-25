@@ -59,6 +59,182 @@ const MENU_STYLE_OPTIONS = [
   { value: 'inline', labelKey: 'menuStyle.inline' },
 ];
 
+const LOCATION_SUBTITLE_OPTIONS = [
+  { value: 'both', labelKey: 'locationSubtitle.both' },
+  { value: 'country', labelKey: 'locationSubtitle.country' },
+  { value: 'coords', labelKey: 'locationSubtitle.coords' },
+];
+
+function LocationSubtitleSegment({ visible, value, onSelect, tr, theme, styles, fs }) {
+  const expand = useRef(new Animated.Value(visible ? 1 : 0)).current;
+  const initialIdx = Math.max(0, LOCATION_SUBTITLE_OPTIONS.findIndex((o) => o.value === value));
+  const pillAnim = useRef(new Animated.Value(initialIdx)).current;
+  const stretchAnim = useRef(new Animated.Value(0)).current;
+  const [contentHeight, setContentHeight] = useState(0);
+  const [rowWidth, setRowWidth] = useState(0);
+  const didMountExpandRef = useRef(false);
+  const didMountPillRef = useRef(false);
+
+  const selectedIndex = Math.max(0, LOCATION_SUBTITLE_OPTIONS.findIndex((o) => o.value === value));
+
+  useEffect(() => {
+    if (!didMountExpandRef.current) {
+      didMountExpandRef.current = true;
+      expand.setValue(visible ? 1 : 0);
+      return;
+    }
+    Animated.timing(expand, {
+      toValue: visible ? 1 : 0,
+      duration: visible ? 300 : 220,
+      easing: visible ? Easing.bezier(0.22, 1, 0.36, 1) : Easing.inOut(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+  }, [visible, expand]);
+
+  useEffect(() => {
+    if (!didMountPillRef.current) {
+      didMountPillRef.current = true;
+      pillAnim.setValue(selectedIndex);
+      return;
+    }
+    stretchAnim.stopAnimation();
+    stretchAnim.setValue(0);
+    Animated.parallel([
+      Animated.spring(pillAnim, {
+        toValue: selectedIndex,
+        stiffness: 320,
+        damping: 26,
+        mass: 0.85,
+        useNativeDriver: true,
+      }),
+      Animated.sequence([
+        Animated.timing(stretchAnim, {
+          toValue: 1,
+          duration: 90,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.spring(stretchAnim, {
+          toValue: 0,
+          stiffness: 280,
+          damping: 20,
+          useNativeDriver: true,
+        }),
+      ]),
+    ]).start();
+  }, [selectedIndex, pillAnim, stretchAnim]);
+
+  const count = LOCATION_SUBTITLE_OPTIONS.length;
+  const pad = 4;
+  const gap = 4;
+  const pillWidth = rowWidth > pad * 2 ? (rowWidth - pad * 2 - gap * (count - 1)) / count : 0;
+
+  const containerHeight = contentHeight > 0
+    ? expand.interpolate({ inputRange: [0, 1], outputRange: [0, contentHeight] })
+    : (visible ? undefined : 0);
+  const innerOpacity = expand.interpolate({ inputRange: [0, 0.35, 1], outputRange: [0, 0.55, 1] });
+  const innerTranslateY = expand.interpolate({ inputRange: [0, 1], outputRange: [-8, 0] });
+  const innerScale = expand.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] });
+  const pillTranslateX = pillAnim.interpolate({
+    inputRange: [0, 1, 2],
+    outputRange: [0, pillWidth + gap, (pillWidth + gap) * 2],
+  });
+  const pillScaleX = stretchAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.07] });
+  const pillScaleY = stretchAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 0.95] });
+
+  return (
+    <Animated.View
+      style={{ height: containerHeight, overflow: 'hidden', position: 'relative' }}
+      pointerEvents={visible ? 'auto' : 'none'}
+      accessibilityElementsHidden={!visible}
+      importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}
+    >
+      <Animated.View
+        onLayout={(e) => {
+          const h = Math.ceil(e.nativeEvent.layout.height);
+          if (h > 0 && h !== contentHeight) setContentHeight(h);
+        }}
+        style={[
+          contentHeight > 0 || !visible ? { position: 'absolute', top: 0, left: 0, right: 0 } : null,
+          {
+            paddingTop: fs.spacing * 0.75,
+            opacity: innerOpacity,
+            transform: [{ translateY: innerTranslateY }, { scale: innerScale }],
+          },
+        ]}
+      >
+        <View
+          style={styles.segmentRow}
+          onLayout={(e) => {
+            const w = e.nativeEvent.layout.width;
+            if (w > 0 && Math.abs(w - rowWidth) > 0.5) setRowWidth(w);
+          }}
+        >
+          {pillWidth > 0 && (
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.segmentPill,
+                {
+                  width: pillWidth,
+                  backgroundColor: theme.accent,
+                  transform: [
+                    { translateX: pillTranslateX },
+                    { scaleX: pillScaleX },
+                    { scaleY: pillScaleY },
+                  ],
+                },
+              ]}
+            />
+          )}
+          {LOCATION_SUBTITLE_OPTIONS.map((opt, idx) => {
+            // Sync label brightness smoothly with the sliding pill position so
+            // text never snaps gray while the accent pill is still underneath it.
+            const activeOpacity = pillAnim.interpolate({
+              inputRange: [idx - 1, idx, idx + 1],
+              outputRange: [0, 1, 0],
+              extrapolate: 'clamp',
+            });
+            const inactiveOpacity = pillAnim.interpolate({
+              inputRange: [idx - 1, idx, idx + 1],
+              outputRange: [1, 0, 1],
+              extrapolate: 'clamp',
+            });
+            return (
+              <PressableScale
+                key={opt.value}
+                style={styles.segmentBtn}
+                scaleTo={0.96}
+                haptic
+                onPress={() => onSelect(opt.value)}
+              >
+                <View style={styles.segmentLabelWrap}>
+                  <Animated.Text
+                    style={[styles.segmentText, { opacity: inactiveOpacity }]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.82}
+                  >
+                    {tr(opt.labelKey)}
+                  </Animated.Text>
+                  <Animated.Text
+                    style={[styles.segmentText, styles.segmentTextActive, styles.segmentTextOverlay, { opacity: activeOpacity }]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.82}
+                  >
+                    {tr(opt.labelKey)}
+                  </Animated.Text>
+                </View>
+              </PressableScale>
+            );
+          })}
+        </View>
+      </Animated.View>
+    </Animated.View>
+  );
+}
+
 const APP_VERSION = require('./package.json').version;
 const APP_ICON_SOURCE = require('./assets/icon.png');
 const GITHUB_URL = 'https://github.com/werxuiiika/My-Weather-app';
@@ -120,6 +296,63 @@ function buildStyles(theme, fs) {
       paddingVertical: fs.spacing * 0.875,
       minHeight: 70 * fs.fontScale,
       marginTop: fs.spacing * 0.5,
+    },
+    cardColumn: {
+      backgroundColor: theme.surface,
+      borderRadius: 16,
+      paddingHorizontal: fs.spacing,
+      paddingVertical: fs.spacing * 0.875,
+      marginTop: fs.spacing * 0.5,
+    },
+    cardTopRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+    },
+    segmentRow: {
+      flexDirection: 'row',
+      backgroundColor: theme.background,
+      borderRadius: 12,
+      padding: 4,
+      gap: 4,
+      position: 'relative',
+    },
+    segmentPill: {
+      position: 'absolute',
+      top: 4,
+      bottom: 4,
+      left: 4,
+      borderRadius: 9,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.2,
+      shadowRadius: 4,
+      elevation: 2,
+    },
+    segmentBtn: {
+      flex: 1,
+      paddingVertical: fs.spacing * 0.5,
+      paddingHorizontal: 6,
+      borderRadius: 9,
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: 1,
+    },
+    segmentLabelWrap: {
+      position: 'relative',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    segmentText: {
+      fontSize: fs.small * 0.95,
+      fontWeight: '600',
+      color: theme.textSecondary,
+    },
+    segmentTextActive: {
+      color: theme.onAccent || '#ffffff',
+      fontWeight: '700',
+    },
+    segmentTextOverlay: {
+      position: 'absolute',
     },
     cardTextWrap: { flex: 1, marginRight: fs.spacing * 0.5, minWidth: 0 },
     cardTitle: { fontSize: fs.base, fontWeight: '600', color: theme.text },
@@ -727,8 +960,18 @@ function SettingsMenuWrapper({
   menuStyle, visible, onClose, title, options, selectedValue, onSelect, tr, theme, insets, styles, icon, desc, fs,
 }) {
   const chevronAnim = useRef(new Animated.Value(visible && menuStyle === 'inline' ? 1 : 0)).current;
+  const didMountRef = useRef(false);
+  const [hasMountedPicker, setHasMountedPicker] = useState(visible);
 
   useEffect(() => {
+    if (visible && !hasMountedPicker) setHasMountedPicker(true);
+  }, [visible, hasMountedPicker]);
+
+  useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
     Animated.timing(chevronAnim, {
       toValue: visible && menuStyle === 'inline' ? 1 : 0,
       duration: 180,
@@ -776,7 +1019,7 @@ function SettingsMenuWrapper({
         </Animated.Text>
       </PressableScale>
 
-      {menuStyle === 'inline' && (
+      {hasMountedPicker && menuStyle === 'inline' && (
         <InlinePicker
           visible={visible}
           options={options}
@@ -790,7 +1033,7 @@ function SettingsMenuWrapper({
         />
       )}
 
-      {menuStyle === 'bottom' && (
+      {hasMountedPicker && menuStyle === 'bottom' && (
         <BottomSheet
           visible={visible}
           onClose={onClose}
@@ -804,7 +1047,7 @@ function SettingsMenuWrapper({
         />
       )}
 
-      {menuStyle === 'center' && (
+      {hasMountedPicker && menuStyle === 'center' && (
         <CenteredModal
           visible={visible}
           onClose={onClose}
@@ -857,12 +1100,37 @@ async function saveRememberCityEnabled(value) {
 const CONFIRM_DELETE_ENABLED_KEY = 'confirm_delete_enabled';
 const DEV_MENU_KEY = 'dev_menu_unlocked';
 
-async function loadConfirmDeleteEnabled() {
+let cachedSettingsPrefs = null;
+
+async function loadAllSettingsPrefs() {
   try {
-    const v = await AsyncStorage.getItem(CONFIRM_DELETE_ENABLED_KEY);
-    return v === null ? true : v === 'true';
+    const pairs = await AsyncStorage.multiGet([
+      MENU_STYLE_KEY,
+      REMEMBER_CITY_ENABLED_KEY,
+      CONFIRM_DELETE_ENABLED_KEY,
+      DEV_MENU_KEY,
+    ]);
+    const map = Object.fromEntries(pairs);
+    const savedMenu = map[MENU_STYLE_KEY];
+    const prefs = {
+      menuStyle: savedMenu && ['center', 'bottom', 'inline'].includes(savedMenu) ? savedMenu : DEFAULT_MENU_STYLE,
+      rememberCity: map[REMEMBER_CITY_ENABLED_KEY] === null || map[REMEMBER_CITY_ENABLED_KEY] === undefined
+        ? true
+        : map[REMEMBER_CITY_ENABLED_KEY] === 'true',
+      confirmDelete: map[CONFIRM_DELETE_ENABLED_KEY] === null || map[CONFIRM_DELETE_ENABLED_KEY] === undefined
+        ? true
+        : map[CONFIRM_DELETE_ENABLED_KEY] === 'true',
+      devUnlocked: map[DEV_MENU_KEY] === 'true',
+    };
+    cachedSettingsPrefs = prefs;
+    return prefs;
   } catch (e) {
-    return true;
+    return cachedSettingsPrefs || {
+      menuStyle: DEFAULT_MENU_STYLE,
+      rememberCity: true,
+      confirmDelete: true,
+      devUnlocked: false,
+    };
   }
 }
 
@@ -876,28 +1144,60 @@ export default function SettingsScreen() {
   const navigation = useNavigation();
   const { t: tr, i18n: i18nInstance } = useTranslation();
   const { theme, setThemeMode, themeMode } = useTheme();
-  const { tempUnit, windUnit, setTempUnit, setWindUnit, showSourceBadge, setShowSourceBadge } = useSettings();
+  const {
+    tempUnit,
+    windUnit,
+    setTempUnit,
+    setWindUnit,
+    showSourceBadge,
+    setShowSourceBadge,
+    locationSubtitleMode,
+    setLocationSubtitleMode,
+  } = useSettings();
+  const lastVisibleSubtitleModeRef = useRef(
+    locationSubtitleMode && locationSubtitleMode !== 'hidden' ? locationSubtitleMode : 'both',
+  );
+  if (locationSubtitleMode && locationSubtitleMode !== 'hidden') {
+    lastVisibleSubtitleModeRef.current = locationSubtitleMode;
+  }
+  const locationSubtitleVisible = locationSubtitleMode !== 'hidden';
+  const toggleLocationSubtitle = (enabled) => {
+    setLocationSubtitleMode(enabled ? lastVisibleSubtitleModeRef.current : 'hidden');
+  };
   const fs = useFontSize();
   const { fontScale, setFontScale } = fs;
   const styles = useMemo(() => buildStyles(theme, fs), [theme, fs]);
   const insets = useSafeAreaInsets();
 
-  const [rememberCity, setRememberCity] = useState(true);
-  const [confirmDelete, setConfirmDelete] = useState(true);
+  const [rememberCity, setRememberCity] = useState(cachedSettingsPrefs ? cachedSettingsPrefs.rememberCity : true);
+  const [confirmDelete, setConfirmDelete] = useState(cachedSettingsPrefs ? cachedSettingsPrefs.confirmDelete : true);
   // Dev menu (crash logs entry) visibility. Unlocked once via the secret
   // version taps, persisted — no need to tap every time. Long-press the
   // entry itself to lock it away again.
-  const [devUnlocked, setDevUnlocked] = useState(false);
-  const [menuStyle, setMenuStyle] = useState(DEFAULT_MENU_STYLE);
+  const [devUnlocked, setDevUnlocked] = useState(cachedSettingsPrefs ? cachedSettingsPrefs.devUnlocked : false);
+  const [menuStyle, setMenuStyle] = useState(cachedSettingsPrefs ? cachedSettingsPrefs.menuStyle : DEFAULT_MENU_STYLE);
+  // Defer below-the-fold cards until the slide_from_right transition finishes so
+  // the entry frame budget stays locked to native 90/120fps without mount jank.
+  const [belowFoldReady, setBelowFoldReady] = useState(false);
   const [showThemePicker, setShowThemePicker] = useState(false);
   const [showLanguagePicker, setShowLanguagePicker] = useState(false);
   const [showTempPicker, setShowTempPicker] = useState(false);
   const [showWindPicker, setShowWindPicker] = useState(false);
   const [showMenuStylePicker, setShowMenuStylePicker] = useState(false);
   const [showFontSizePicker, setShowFontSizePicker] = useState(false);
+  const [hasMountedFontModal, setHasMountedFontModal] = useState(false);
   const [showLogViewer, setShowLogViewer] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
+  const [hasMountedImportModal, setHasMountedImportModal] = useState(false);
   const { alert, showAlert, hideAlert } = useCustomAlert();
+
+  useEffect(() => {
+    if (showFontSizePicker && !hasMountedFontModal) setHasMountedFontModal(true);
+  }, [showFontSizePicker, hasMountedFontModal]);
+
+  useEffect(() => {
+    if (showImportModal && !hasMountedImportModal) setHasMountedImportModal(true);
+  }, [showImportModal, hasMountedImportModal]);
 
 
 
@@ -937,6 +1237,7 @@ export default function SettingsScreen() {
         await AsyncStorage.setItem(DEV_MENU_KEY, 'true');
       } catch (e) {}
       setDevUnlocked(true);
+      if (cachedSettingsPrefs) cachedSettingsPrefs = { ...cachedSettingsPrefs, devUnlocked: true };
       setShowLogViewer(true);
       return;
     }
@@ -948,27 +1249,41 @@ export default function SettingsScreen() {
   };
 
   useEffect(() => {
-    (async () => {
-      const saved = await loadMenuStyle();
-      setMenuStyle(saved);
-      const remember = await loadRememberCityEnabled();
-      setRememberCity(remember);
-      const confirm = await loadConfirmDeleteEnabled();
-      setConfirmDelete(confirm);
-      try {
-        const dev = await AsyncStorage.getItem(DEV_MENU_KEY);
-        setDevUnlocked(dev === 'true');
-      } catch (e) {}
-    })();
-  }, []);
+    let active = true;
+    let settled = false;
+    const settle = () => {
+      if (!active || settled) return;
+      settled = true;
+      setBelowFoldReady(true);
+      loadAllSettingsPrefs().then((prefs) => {
+        if (!active) return;
+        setMenuStyle((prev) => (prev === prefs.menuStyle ? prev : prefs.menuStyle));
+        setRememberCity((prev) => (prev === prefs.rememberCity ? prev : prefs.rememberCity));
+        setConfirmDelete((prev) => (prev === prefs.confirmDelete ? prev : prefs.confirmDelete));
+        setDevUnlocked((prev) => (prev === prefs.devUnlocked ? prev : prefs.devUnlocked));
+      });
+    };
+    const unsubscribe = navigation.addListener('transitionEnd', (e) => {
+      if (!e?.data?.closing) settle();
+    });
+    // Fallback in case system animations are disabled (transitionEnd may not fire).
+    const fallbackTimer = setTimeout(settle, 420);
+    return () => {
+      active = false;
+      unsubscribe();
+      clearTimeout(fallbackTimer);
+    };
+  }, [navigation]);
 
   const toggleRemember = async (value) => {
     setRememberCity(value);
+    if (cachedSettingsPrefs) cachedSettingsPrefs = { ...cachedSettingsPrefs, rememberCity: value };
     await saveRememberCityEnabled(value);
   };
 
   const toggleConfirmDelete = async (value) => {
     setConfirmDelete(value);
+    if (cachedSettingsPrefs) cachedSettingsPrefs = { ...cachedSettingsPrefs, confirmDelete: value };
     await saveConfirmDeleteEnabled(value);
   };
 
@@ -977,6 +1292,7 @@ export default function SettingsScreen() {
       await AsyncStorage.removeItem(DEV_MENU_KEY);
     } catch (e) {}
     setDevUnlocked(false);
+    if (cachedSettingsPrefs) cachedSettingsPrefs = { ...cachedSettingsPrefs, devUnlocked: false };
     try {
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
     } catch (e) {}
@@ -1022,6 +1338,7 @@ export default function SettingsScreen() {
     if (value !== null) {
       await saveMenuStyle(value);
       setMenuStyle(value);
+      if (cachedSettingsPrefs) cachedSettingsPrefs = { ...cachedSettingsPrefs, menuStyle: value };
       setShowMenuStylePicker(false);
     } else {
       setShowMenuStylePicker(true);
@@ -1127,6 +1444,31 @@ export default function SettingsScreen() {
               accessibilityLabel={tr('showSource')}
             />
           </View>
+          <View style={styles.cardColumn}>
+            <View style={styles.cardTopRow}>
+              <View style={[styles.cardTextWrap, { flex: 1 }]}>
+                <Text style={styles.cardTitle}>{tr('locationSubtitle')}</Text>
+                <Text style={styles.cardDesc}>{tr('locationSubtitleDesc')}</Text>
+              </View>
+              <AnimatedSwitch
+                style={{ flexShrink: 0, alignSelf: 'center', marginLeft: 10 }}
+                value={locationSubtitleVisible}
+                onValueChange={toggleLocationSubtitle}
+                trackColor={{ false: theme.textMuted, true: theme.accent2 }}
+                thumbColor="#ffffff"
+                accessibilityLabel={tr('locationSubtitle')}
+              />
+            </View>
+            <LocationSubtitleSegment
+              visible={locationSubtitleVisible}
+              value={locationSubtitleVisible ? locationSubtitleMode : lastVisibleSubtitleModeRef.current}
+              onSelect={setLocationSubtitleMode}
+              tr={tr}
+              theme={theme}
+              styles={styles}
+              fs={fs}
+            />
+          </View>
         </View>
 
         <Text style={styles.sectionTitle}>{tr('interface')}</Text>
@@ -1148,183 +1490,195 @@ export default function SettingsScreen() {
             fs={fs}
           />
 
-          <SettingsMenuWrapper
-            menuStyle={menuStyle}
-            visible={showLanguagePicker}
-            onClose={() => setShowLanguagePicker(false)}
-            onSelect={handleLanguageSelect}
-            title={tr('language')}
-            icon="🌐"
-            desc={currentLanguageLabel}
-            options={LANGUAGE_OPTIONS}
-            selectedValue={i18nInstance.language}
-            tr={tr}
-            theme={theme}
-            insets={insets}
-            styles={styles}
-            fs={fs}
-          />
+          {belowFoldReady && (
+            <>
+              <SettingsMenuWrapper
+                menuStyle={menuStyle}
+                visible={showLanguagePicker}
+                onClose={() => setShowLanguagePicker(false)}
+                onSelect={handleLanguageSelect}
+                title={tr('language')}
+                icon="🌐"
+                desc={currentLanguageLabel}
+                options={LANGUAGE_OPTIONS}
+                selectedValue={i18nInstance.language}
+                tr={tr}
+                theme={theme}
+                insets={insets}
+                styles={styles}
+                fs={fs}
+              />
 
-          <SettingsMenuWrapper
-            menuStyle={menuStyle}
-            visible={showMenuStylePicker}
-            onClose={() => setShowMenuStylePicker(false)}
-            onSelect={handleMenuStyleSelect}
-            title={tr('menuStyle')}
-            icon="📋"
-            desc={currentMenuStyleLabel}
-            options={MENU_STYLE_OPTIONS}
-            selectedValue={menuStyle}
-            tr={tr}
-            theme={theme}
-            insets={insets}
-            styles={styles}
-            fs={fs}
-          />
+              <SettingsMenuWrapper
+                menuStyle={menuStyle}
+                visible={showMenuStylePicker}
+                onClose={() => setShowMenuStylePicker(false)}
+                onSelect={handleMenuStyleSelect}
+                title={tr('menuStyle')}
+                icon="📋"
+                desc={currentMenuStyleLabel}
+                options={MENU_STYLE_OPTIONS}
+                selectedValue={menuStyle}
+                tr={tr}
+                theme={theme}
+                insets={insets}
+                styles={styles}
+                fs={fs}
+              />
 
-          <PressableScale style={styles.card} scaleTo={0.98} onPress={() => setShowFontSizePicker(true)}>
-            <View style={styles.iconWrap}>
-              <Ionicons name="text" size={fs.iconSize * 0.77} color={theme.textSecondary} />
-            </View>
-            <View style={[styles.cardTextWrap, { flex: 1 }]}>
-              <Text style={styles.cardTitle}>{tr('fontSize')}</Text>
-              <Text style={styles.cardDesc}>{tr('fontSizeDesc')}</Text>
-            </View>
-            <Text style={[styles.cardDesc, { marginRight: 8 }]}>{`${Math.round(fontScale * 100)}%`}</Text>
-            <Text style={styles.chevron}>›</Text>
-          </PressableScale>
-        </View>
-        <View style={styles.cardStack}>
-          <SettingsMenuWrapper
-            menuStyle={menuStyle}
-            visible={showTempPicker}
-            onClose={() => setShowTempPicker(false)}
-            onSelect={handleTempSelect}
-            title={tr('temperature')}
-            icon="🌡️"
-            desc={currentTempLabel}
-            options={TEMP_UNIT_OPTIONS}
-            selectedValue={tempUnit}
-            tr={tr}
-            theme={theme}
-            insets={insets}
-            styles={styles}
-            fs={fs}
-          />
-
-          <SettingsMenuWrapper
-            menuStyle={menuStyle}
-            visible={showWindPicker}
-            onClose={() => setShowWindPicker(false)}
-            onSelect={handleWindSelect}
-            title={tr('windSpeed')}
-            icon="💨"
-            desc={currentWindLabel}
-            options={WIND_UNIT_OPTIONS}
-            selectedValue={windUnit}
-            tr={tr}
-            theme={theme}
-            insets={insets}
-            styles={styles}
-            fs={fs}
-          />
-        </View>
-
-        <Text style={styles.sectionTitle}>{tr('aboutProject')}</Text>
-        <View style={styles.cardStack}>
-          <PressableScale
-            style={styles.card}
-            scaleTo={0.98}
-            onPress={openGitHub}
-          >
-            <View style={styles.iconWrap}>
-              <GithubIcon size={22} color={theme.text} />
-            </View>
-            <View style={styles.cardTextWrap}>
-              <Text style={styles.cardTitle}>{tr('sourceCode')}</Text>
-              <Text style={styles.cardDesc}>{tr('githubDesc')}</Text>
-            </View>
-            <Text style={styles.chevron}>›</Text>
-          </PressableScale>
-          <PressableScale style={styles.card} scaleTo={0.98} onPress={() => navigation.navigate('NetDiag')}>
-            <View style={styles.iconWrap}>
-              <Ionicons name="pulse" size={fs.iconSize * 0.77} color={theme.text} />
-            </View>
-            <View style={[styles.cardTextWrap, { flex: 1 }]}>
-              <Text style={styles.cardTitle}>{tr('netdiagTitle')}</Text>
-              <Text style={styles.cardDesc}>{tr('netdiagDesc')}</Text>
-            </View>
-            <Text style={styles.chevron}>›</Text>
-          </PressableScale>
-          <PressableScale
-            style={styles.card}
-            scaleTo={0.98}
-            onPress={() => setShowImportModal(menuStyle === 'inline' ? !showImportModal : true)}
-          >
-            <View style={styles.iconWrap}>
-              <Ionicons name="save-outline" size={fs.iconSize * 0.77} color={theme.text} />
-            </View>
-            <View style={[styles.cardTextWrap, { flex: 1 }]}>
-              <Text style={styles.cardTitle}>{tr('backupTitle')}</Text>
-              <Text style={styles.cardDesc}>{tr('backupDesc')}</Text>
-            </View>
-            <Text style={styles.chevron}>{showImportModal && menuStyle === 'inline' ? '▲' : '›'}</Text>
-          </PressableScale>
-          {menuStyle === 'inline' && (
-            <CitiesImportModal
-              visible={showImportModal}
-              onClose={() => setShowImportModal(false)}
-              theme={theme}
-              fs={fs}
-              onImported={(count) =>
-                showAlert({
-                  toast: true,
-                  title: tr('backupImportedTitle'),
-                  message: tr('backupImportedCount', { count }),
-                })
-              }
-              showAlert={showAlert}
-              hideAlert={hideAlert}
-              menuStyle="inline"
-            />
+              <PressableScale style={styles.card} scaleTo={0.98} onPress={() => setShowFontSizePicker(true)}>
+                <View style={styles.iconWrap}>
+                  <Ionicons name="text" size={fs.iconSize * 0.77} color={theme.textSecondary} />
+                </View>
+                <View style={[styles.cardTextWrap, { flex: 1 }]}>
+                  <Text style={styles.cardTitle}>{tr('fontSize')}</Text>
+                  <Text style={styles.cardDesc}>{tr('fontSizeDesc')}</Text>
+                </View>
+                <Text style={[styles.cardDesc, { marginRight: 8 }]}>{`${Math.round(fontScale * 100)}%`}</Text>
+                <Text style={styles.chevron}>›</Text>
+              </PressableScale>
+            </>
           )}
-          {devUnlocked ? (
-            <PressableScale
-              style={styles.card}
-              scaleTo={0.98}
-              onPress={() => setShowLogViewer(true)}
-              onLongPress={handleDevLock}
-              delayLongPress={800}
-            >
-              <View style={styles.iconWrap}>
-                <Ionicons name="document-text" size={fs.iconSize * 0.77} color={theme.text} />
-              </View>
-              <View style={[styles.cardTextWrap, { flex: 1, flexDirection: 'row', alignItems: 'center' }]}>
-                <Text style={[styles.cardTitle, { flex: 1, flexShrink: 1 }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>Логи ошибок</Text>
-                <Text style={[styles.cardDesc, { marginLeft: 10, marginTop: 0, flexShrink: 0, marginRight: 8 }]} numberOfLines={1}>Просмотр и отправка</Text>
-              </View>
-              <Text style={styles.chevron}>›</Text>
-            </PressableScale>
-          ) : null}
         </View>
+        {belowFoldReady && (
+          <>
+            <View style={styles.cardStack}>
+              <SettingsMenuWrapper
+                menuStyle={menuStyle}
+                visible={showTempPicker}
+                onClose={() => setShowTempPicker(false)}
+                onSelect={handleTempSelect}
+                title={tr('temperature')}
+                icon="🌡️"
+                desc={currentTempLabel}
+                options={TEMP_UNIT_OPTIONS}
+                selectedValue={tempUnit}
+                tr={tr}
+                theme={theme}
+                insets={insets}
+                styles={styles}
+                fs={fs}
+              />
+
+              <SettingsMenuWrapper
+                menuStyle={menuStyle}
+                visible={showWindPicker}
+                onClose={() => setShowWindPicker(false)}
+                onSelect={handleWindSelect}
+                title={tr('windSpeed')}
+                icon="💨"
+                desc={currentWindLabel}
+                options={WIND_UNIT_OPTIONS}
+                selectedValue={windUnit}
+                tr={tr}
+                theme={theme}
+                insets={insets}
+                styles={styles}
+                fs={fs}
+              />
+            </View>
+
+            <Text style={styles.sectionTitle}>{tr('aboutProject')}</Text>
+            <View style={styles.cardStack}>
+              <PressableScale
+                style={styles.card}
+                scaleTo={0.98}
+                onPress={openGitHub}
+              >
+                <View style={styles.iconWrap}>
+                  <GithubIcon size={22} color={theme.text} />
+                </View>
+                <View style={styles.cardTextWrap}>
+                  <Text style={styles.cardTitle}>{tr('sourceCode')}</Text>
+                  <Text style={styles.cardDesc}>{tr('githubDesc')}</Text>
+                </View>
+                <Text style={styles.chevron}>›</Text>
+              </PressableScale>
+              <PressableScale style={styles.card} scaleTo={0.98} onPress={() => navigation.navigate('NetDiag')}>
+                <View style={styles.iconWrap}>
+                  <Ionicons name="pulse" size={fs.iconSize * 0.77} color={theme.text} />
+                </View>
+                <View style={[styles.cardTextWrap, { flex: 1 }]}>
+                  <Text style={styles.cardTitle}>{tr('netdiagTitle')}</Text>
+                  <Text style={styles.cardDesc}>{tr('netdiagDesc')}</Text>
+                </View>
+                <Text style={styles.chevron}>›</Text>
+              </PressableScale>
+              <PressableScale
+                style={styles.card}
+                scaleTo={0.98}
+                onPress={() => setShowImportModal(menuStyle === 'inline' ? !showImportModal : true)}
+              >
+                <View style={styles.iconWrap}>
+                  <Ionicons name="save-outline" size={fs.iconSize * 0.77} color={theme.text} />
+                </View>
+                <View style={[styles.cardTextWrap, { flex: 1 }]}>
+                  <Text style={styles.cardTitle}>{tr('backupTitle')}</Text>
+                  <Text style={styles.cardDesc}>{tr('backupDesc')}</Text>
+                </View>
+                <Text style={styles.chevron}>{showImportModal && menuStyle === 'inline' ? '▲' : '›'}</Text>
+              </PressableScale>
+              {hasMountedImportModal && menuStyle === 'inline' && (
+                <CitiesImportModal
+                  visible={showImportModal}
+                  onClose={() => setShowImportModal(false)}
+                  theme={theme}
+                  fs={fs}
+                  onImported={(count) =>
+                    showAlert({
+                      toast: true,
+                      title: tr('backupImportedTitle'),
+                      message: tr('backupImportedCount', { count }),
+                    })
+                  }
+                  showAlert={showAlert}
+                  hideAlert={hideAlert}
+                  menuStyle="inline"
+                />
+              )}
+              {devUnlocked ? (
+                <PressableScale
+                  style={styles.card}
+                  scaleTo={0.98}
+                  onPress={() => setShowLogViewer(true)}
+                  onLongPress={handleDevLock}
+                  delayLongPress={800}
+                >
+                  <View style={styles.iconWrap}>
+                    <Ionicons name="document-text" size={fs.iconSize * 0.77} color={theme.text} />
+                  </View>
+                  <View style={[styles.cardTextWrap, { flex: 1, flexDirection: 'row', alignItems: 'center' }]}>
+                    <Text style={[styles.cardTitle, { flex: 1, flexShrink: 1 }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>{tr('crashLogsTitle')}</Text>
+                    <Text style={[styles.cardDesc, { marginLeft: 10, marginTop: 0, flexShrink: 0, marginRight: 8 }]} numberOfLines={1}>{tr('crashLogsDesc')}</Text>
+                  </View>
+                  <Text style={styles.chevron}>›</Text>
+                </PressableScale>
+              ) : null}
+            </View>
+          </>
+        )}
       </ScrollView>
 
-      <FontSizeModal
-        visible={showFontSizePicker}
-        onClose={() => setShowFontSizePicker(false)}
-        fontScale={fontScale}
-        setFontScale={setFontScale}
-        tr={tr}
-        theme={theme}
-        fs={fs}
-      />
-      <CrashLogViewer
-        visible={showLogViewer}
-        onClose={() => setShowLogViewer(false)}
-        theme={theme}
-        fs={fs}
-      />
-      {menuStyle !== 'inline' && (
+      {hasMountedFontModal && (
+        <FontSizeModal
+          visible={showFontSizePicker}
+          onClose={() => setShowFontSizePicker(false)}
+          fontScale={fontScale}
+          setFontScale={setFontScale}
+          tr={tr}
+          theme={theme}
+          fs={fs}
+        />
+      )}
+      {showLogViewer && (
+        <CrashLogViewer
+          visible={showLogViewer}
+          onClose={() => setShowLogViewer(false)}
+          theme={theme}
+          fs={fs}
+        />
+      )}
+      {hasMountedImportModal && menuStyle !== 'inline' && (
         <CitiesImportModal
           visible={showImportModal}
           onClose={() => setShowImportModal(false)}

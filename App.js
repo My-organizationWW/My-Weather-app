@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -31,33 +31,43 @@ const Stack = createNativeStackNavigator();
 
 function AppContent() {
   const [isI18nReady, setIsI18nReady] = useState(false);
+  const { theme } = useTheme();
 
   useEffect(() => {
-    initI18n().then(() => setIsI18nReady(true));
+    let active = true;
+    initI18n().then(() => {
+      if (active) setIsI18nReady(true);
+    });
+    return () => { active = false; };
   }, []);
 
   if (!isI18nReady) {
-    return <View style={{ flex: 1, backgroundColor: '#fff' }} />;
+    return <View style={{ flex: 1, backgroundColor: theme.background }} />;
   }
 
   return <AppMain />;
 }
 
+const NOOP = () => {};
+
 function AppMain() {
-  const { t } = useTranslation();
-  const { loaded, themeOverlayOpacity, theme } = useTheme();
+  const { themeOverlayOpacity, theme } = useTheme();
   // Any still-unpainted native surface (transition gaps, detached views)
   // uses the app background instead of the OS grey: the flash becomes
   // structurally impossible in every theme mode.
-  const navTheme = {
-    ...DefaultTheme,
-    dark: theme.mode !== 'light',
-    colors: { ...DefaultTheme.colors, background: theme.background, card: theme.background },
-  };
+  const navTheme = useMemo(
+    () => ({
+      ...DefaultTheme,
+      dark: theme.mode !== 'light',
+      colors: { ...DefaultTheme.colors, background: theme.background, card: theme.background },
+    }),
+    [theme.mode, theme.background],
+  );
+  const loadingValue = useMemo(() => ({ isLoading: false, setLoading: NOOP }), []);
 
-return (
+  return (
     <GlobalErrorBoundary>
-      <LoadingContext.Provider value={{ isLoading: false, setLoading: () => {} }}>
+      <LoadingContext.Provider value={loadingValue}>
         <Animated.View style={{ flex: 1, opacity: themeOverlayOpacity }}>
           <GestureHandlerRootView style={{ flex: 1 }}>
             <FontSizeProvider>
@@ -68,6 +78,7 @@ return (
                       screenOptions={{
                         headerShown: false,
                         animation: 'slide_from_right',
+                        contentStyle: { backgroundColor: theme.background },
                         // Suspend (don't detach) the outgoing screen: it
                         // keeps its last frame behind the entering one.
                         // NOTE: detachInactiveScreens does not exist in the
@@ -85,7 +96,7 @@ return (
                       <Stack.Screen
                         name="CityList"
                         component={CityListScreen}
-                        options={{ animation: 'slide_from_right' }}
+                        options={{ animation: 'slide_from_right', freezeOnBlur: false }}
                       />
                       <Stack.Screen
                         name="NetDiag"
@@ -125,12 +136,13 @@ function TabScreens() {
   );
 }
 
-function AnimatedTabBar({ state, descriptors, navigation, style }) {
+const AnimatedTabBar = React.memo(function AnimatedTabBar({ state, descriptors, navigation, style }) {
   const { theme } = useTheme();
   const { t } = useTranslation();
   const { base, iconSize } = useFontSize();
   const animationValues = useRef(state.routes.map(() => new Animated.Value(1))).current;
-  // Focus cross-fade per tab (0 = muted, 1 = accent), for the label colour.
+  // Focus cross-fade per tab (0 = muted, 1 = accent), driven on the native
+  // driver via two opacity-layered text nodes (native driver cannot animate color).
   const focusValues = useRef(state.routes.map((route) => new Animated.Value(
     route.name === state.routes[state.index].name ? 1 : 0
   ))).current;
@@ -173,7 +185,6 @@ function AnimatedTabBar({ state, descriptors, navigation, style }) {
       }}
     >
       {state.routes.map((route, index) => {
-        const { options } = descriptors[route.key];
         const isFocused = state.index === index;
         const IconComponent = route.name === 'weather' ? SunTabIcon : SearchTabIcon;
         const label = route.name === 'weather' ? t('weather') : t('phenomena');
@@ -184,6 +195,11 @@ function AnimatedTabBar({ state, descriptors, navigation, style }) {
             navigation.navigate(route.name);
           }
         };
+
+        const mutedOpacity = focusValues[index].interpolate({
+          inputRange: [0, 1],
+          outputRange: [1, 0],
+        });
 
         return (
           <PressableScale
@@ -220,25 +236,38 @@ function AnimatedTabBar({ state, descriptors, navigation, style }) {
                 <IconComponent color={iconColor} size={iconSize * 0.8} />
               </Animated.View>
             </View>
-            <Animated.Text
-              style={{
-                fontSize: base * 0.6875,
-                fontWeight: '600',
-                marginTop: 0,
-                color: focusValues[index].interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [theme.textMuted, theme.accent],
-                }),
-              }}
-            >
-              {label}
-            </Animated.Text>
+            <View style={{ alignItems: 'center', justifyContent: 'center' }}>
+              <Animated.Text
+                style={{
+                  fontSize: base * 0.6875,
+                  fontWeight: '600',
+                  marginTop: 0,
+                  color: theme.textMuted,
+                  opacity: mutedOpacity,
+                }}
+              >
+                {label}
+              </Animated.Text>
+              <Animated.Text
+                pointerEvents="none"
+                style={{
+                  position: 'absolute',
+                  fontSize: base * 0.6875,
+                  fontWeight: '600',
+                  marginTop: 0,
+                  color: theme.accent,
+                  opacity: focusValues[index],
+                }}
+              >
+                {label}
+              </Animated.Text>
+            </View>
           </PressableScale>
         );
       })}
     </View>
   );
-}
+});
 
 export default function App() {
   return (

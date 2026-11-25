@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { View, Text, TextInput, FlatList, Alert, StatusBar, RefreshControl, StyleSheet, Animated as RNAnimated } from 'react-native';
-import Animated, { useSharedValue, useAnimatedStyle, useAnimatedReaction, withTiming, withSpring, FadeInUp, Easing } from 'react-native-reanimated';
+import Animated, { useSharedValue, useAnimatedStyle, useAnimatedReaction, withTiming, withSpring, Easing } from 'react-native-reanimated';
 import ScreenWrapper from './ScreenWrapper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -9,14 +9,18 @@ import { CITIES_CHANGED_KEY } from './utils/citiesBackup';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTheme } from './ThemeContext';
 import { useFontSize } from './FontSizeContext';
+import { useSettings } from './SettingsContext';
 import { useTranslation } from 'react-i18next';
 import * as Location from 'expo-location';
 import { isOfflineError, isRegionLike, resolvePlaceName } from './geocoding';
 import { fetchForecast, searchCity } from './utils/weatherProviders';
+import { fetchJsonWithRetry, isExternalAbortError } from './utils/http';
+import { acquireCurrentPosition } from './utils/locationHelper';
 import ConfirmDeleteModal from './ConfirmDeleteModal';
-import DraggableCityCard from './DraggableCityCard';
+import DraggableCityCard, { StaticCityCardPreview } from './DraggableCityCard';
 import CurrentLocationCard from './CurrentLocationCard';
 import PressableScale from './components/PressableScale';
+import FadeSlideIn from './components/FadeSlideIn';
 import { getPluralSelectedText } from './utils/plural';
 
 const SAVED_CITIES_KEY = 'saved_cities_list';
@@ -25,27 +29,48 @@ const CONFIRM_DELETE_KEY = 'confirm_delete_enabled';
 const BASE_URL = 'https://api.open-meteo.com/v1/forecast';
 const FETCH_TIMEOUT_MS = 15000;
 
-// fetch with timeout + single retry. Transient TLS failures (common
-// through VPNs) usually succeed on the second attempt.
-async function fetchJson(url, timeoutMs = FETCH_TIMEOUT_MS, retries = 1) {
-  let lastError;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timer);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch (e) {
-      clearTimeout(timer);
-      lastError = e;
-      if (attempt < retries) {
-        await new Promise((r) => setTimeout(r, 500));
+// In-memory cache so CityList renders cached cards immediately on frame 0
+// (sliding in together with the screen, zero blank pause), while heavy
+// network/GPS/storage refreshes still wait for `transitionEnd`.
+let cachedCities = null;
+let cachedCurrentLocation = null;
+let cachedConfirmDelete = true;
+let cachedLocationSectionHeight = 0;
+
+export async function preloadCityListCache() {
+  if (cachedCities !== null) return;
+  try {
+    const pairs = await AsyncStorage.multiGet([SAVED_CITIES_KEY, CONFIRM_DELETE_KEY]);
+    const map = Object.fromEntries(pairs);
+    if (map[CONFIRM_DELETE_KEY] !== null && map[CONFIRM_DELETE_KEY] !== undefined) {
+      cachedConfirmDelete = map[CONFIRM_DELETE_KEY] === 'true';
+    }
+    if (map[SAVED_CITIES_KEY]) {
+      const parsed = JSON.parse(map[SAVED_CITIES_KEY]);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const seenNames = new Set();
+        const seenIds = new Set();
+        cachedCities = parsed
+          .filter((c) => {
+            if (!c || !c.name) return false;
+            const norm = c.name.trim().toLowerCase();
+            if (seenNames.has(norm)) return false;
+            seenNames.add(norm);
+            return true;
+          })
+          .map((c, idx) => {
+            let id = String(c.id ?? `city_${idx}`);
+            if (seenIds.has(id)) id = `${id}_${idx}`;
+            seenIds.add(id);
+            return { ...c, id };
+          });
       }
     }
-  }
-  throw lastError;
+  } catch (e) {}
+}
+
+function makeCityFetchJson(signal, timeoutMs = FETCH_TIMEOUT_MS, retries = 1) {
+  return (url) => fetchJsonWithRetry(url, { timeoutMs, retries, signal });
 }
 
 // Pulsing placeholder shown only when there is genuinely nothing cached
@@ -91,6 +116,142 @@ function SkeletonCard({ theme, fs }) {
     </RNAnimated.View>
   );
 }
+
+// Smooth height + opacity + scale reveal for the "Current location" section.
+// Uses Reanimated shared values (no layout animations) so the saved-cities list
+// glides downward smoothly when GPS resolves instead of snapping in 1 frame.
+const LOCATION_REVEAL_TIMING = {
+  duration: 340,
+  easing: Easing.bezier(0.22, 1, 0.36, 1),
+};
+const LOCATION_HIDE_TIMING = {
+  duration: 240,
+  easing: Easing.inOut(Easing.quad),
+};
+
+const CurrentLocationReveal = React.memo(function CurrentLocationReveal({
+  currentLocation,
+  initialVisible,
+  styles,
+  t,
+  theme,
+  fs,
+  tempUnit,
+  onPress,
+}) {
+  const [renderedItem, setRenderedItem] = useState(() => currentLocation);
+  const [measuredHeight, setMeasuredHeight] = useState(() => (initialVisible ? cachedLocationSectionHeight : 0));
+  const isVisible = currentLocation !== null;
+  // Only animate when transitioning between null <-> present; when already
+  // visible on mount (e.g. from cache or preview -> FlatList swap), stay in
+  // normal document flow with zero layout recalculation or 1-frame collapse.
+  const [isAnimating, setIsAnimating] = useState(() => !initialVisible && isVisible);
+  const progress = useSharedValue(initialVisible ? 1 : 0);
+  const heightSV = useSharedValue(cachedLocationSectionHeight);
+  const animatingSV = useSharedValue(!initialVisible && isVisible ? 1 : 0);
+
+  useEffect(() => {
+    if (currentLocation) {
+      setRenderedItem(currentLocation);
+    }
+  }, [currentLocation]);
+
+  useEffect(() => {
+    if (isVisible) {
+      if (progress.value < 1) {
+        setIsAnimating(true);
+        animatingSV.value = 1;
+        if (measuredHeight > 0 || cachedLocationSectionHeight > 0) {
+          const targetH = measuredHeight || cachedLocationSectionHeight;
+          heightSV.value = targetH;
+          progress.value = withTiming(1, LOCATION_REVEAL_TIMING);
+          const doneTimer = setTimeout(() => {
+            animatingSV.value = 0;
+            setIsAnimating(false);
+          }, LOCATION_REVEAL_TIMING.duration + 30);
+          return () => clearTimeout(doneTimer);
+        }
+      }
+    } else if (renderedItem) {
+      setIsAnimating(true);
+      animatingSV.value = 1;
+      progress.value = withTiming(0, LOCATION_HIDE_TIMING);
+      const timer = setTimeout(() => {
+        setRenderedItem(null);
+        animatingSV.value = 0;
+        setIsAnimating(false);
+      }, LOCATION_HIDE_TIMING.duration + 30);
+      return () => clearTimeout(timer);
+    }
+  }, [isVisible, measuredHeight, renderedItem, progress, heightSV, animatingSV]);
+
+  const handleLayout = useCallback((e) => {
+    const h = Math.ceil(e.nativeEvent.layout.height);
+    if (h > 0) {
+      cachedLocationSectionHeight = h;
+      heightSV.value = h;
+      if (h !== measuredHeight) {
+        setMeasuredHeight(h);
+      }
+      if (isVisible && progress.value < 1) {
+        animatingSV.value = 1;
+        setIsAnimating(true);
+        progress.value = withTiming(1, LOCATION_REVEAL_TIMING);
+      }
+    }
+  }, [measuredHeight, heightSV, animatingSV, isVisible, progress]);
+
+  const outerStyle = useAnimatedStyle(() => {
+    if (animatingSV.value === 0) {
+      return {};
+    }
+    return {
+      height: heightSV.value * progress.value,
+      overflow: 'hidden',
+    };
+  });
+
+  const innerStyle = useAnimatedStyle(() => {
+    if (animatingSV.value === 0) {
+      return { opacity: 1, transform: [{ translateY: 0 }, { scale: 1 }] };
+    }
+    const p = progress.value;
+    return {
+      opacity: p,
+      transform: [
+        { translateY: -10 * (1 - p) },
+        { scale: 0.94 + 0.06 * p },
+      ],
+    };
+  });
+
+  if (!renderedItem) return null;
+
+  return (
+    <Animated.View style={outerStyle}>
+      <Animated.View
+        onLayout={handleLayout}
+        style={[
+          isAnimating ? { position: 'absolute', top: 0, left: 0, right: 0 } : null,
+          innerStyle,
+        ]}
+      >
+        <View style={[styles.sectionHeader, { paddingTop: 8 }]}>
+          <Text style={styles.sectionHeaderText}>{t('cities.current_location')}</Text>
+        </View>
+        <CurrentLocationCard
+          item={renderedItem}
+          theme={theme}
+          fs={fs}
+          t={t}
+          tempUnit={tempUnit}
+          style={{ marginBottom: fs.spacing * 0.6 }}
+          onPress={renderedItem.isCoordinateFallback ? undefined : onPress}
+        />
+      </Animated.View>
+    </Animated.View>
+  );
+});
 
 // FlatList wraps every row in its own cell. All movement is applied to the
 // CELL itself, not to the card inside it. This matters for touch handling:
@@ -170,28 +331,43 @@ export default function CityListScreen() {
   const navigation = useNavigation();
   const { theme } = useTheme();
   const fs = useFontSize();
+  const { tempUnit } = useSettings();
   const { t, i18n } = useTranslation();
   const insets = useSafeAreaInsets();
+  const mountedRef = useRef(true);
+  const refreshSeqRef = useRef(0);
+  const refreshAbortRef = useRef(null);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    refreshSeqRef.current += 1;
+    if (refreshAbortRef.current) {
+      try { refreshAbortRef.current.abort(); } catch (e) {}
+    }
+  }, []);
 
   // Saved cities ONLY — the geolocation card lives in `currentLocation`
   // and is never part of this array (not draggable, selectable or deletable).
-  const [cities, setCities] = useState([]);
+  const [cities, setCities] = useState(() => cachedCities || []);
   // Device geolocation weather card. null = unavailable/denied -> no card at all.
-  const [currentLocation, setCurrentLocation] = useState(null);
+  const [currentLocation, setCurrentLocation] = useState(() => cachedCurrentLocation);
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  // The heavy native subtree (FlatList + Reanimated cards + gestures)
-  // mounts only after the push transition: its UI-thread inflation cost
-  // during the animation window starves both screens of frames, exposing
-  // the window background as a grey strip. First paint is header + search
-  // only — same weight class as the (smooth) Settings screen.
+  const hasInitialCacheRef = useRef(cachedCities !== null && cachedCities.length > 0);
+  // Keep the heavy FlatList + Reanimated/RNGH subtree unmounted until
+  // `transitionEnd`, while immediately showing pixel-identical lightweight
+  // StaticCityCardPreview cards on frame 0 so there is ZERO blank delay AND
+  // ZERO push-transition jank!
   const [listMounted, setListMounted] = useState(false);
-   const [isSelectionMode, setIsSelectionMode] = useState(false);
+  const listMountedRef = useRef(false);
+  listMountedRef.current = listMounted;
+  const didInitialSettleRef = useRef(false);
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [selectedCities, setSelectedCities] = useState(new Set());
   const [deleteTarget, setDeleteTarget] = useState(null);
   // Delete-confirmation switch from Settings (default ON).
-  const [confirmDelete, setConfirmDelete] = useState(true);
+  const [confirmDelete, setConfirmDelete] = useState(() => cachedConfirmDelete);
   // True while a drag gesture is active — FlatList scrolling is locked for
   // that time so the scroll view never fights the pan gesture (that fight
   // shows up as jitter of the whole list mid-drag).
@@ -244,9 +420,8 @@ export default function CityListScreen() {
     [order, activeId, activeIndex, dragOffset, cities.length, cardStride],
   );
 
-  // Search row collapse/expand. Animating its height (instead of unmounting
-  // it) prevents the one-frame overlap/jump that looked like flicker when
-  // entering or leaving selection mode.
+  // Search row collapse/expand — 100% GPU transform + opacity (zero per-frame
+  // height relayout of the FlatList container, keeping selection mode at 90fps).
   const searchRowHeight = Math.round(fs.spacing * 3.5 + 8);
   const searchRowProgress = useSharedValue(isSelectionMode ? 0 : 1);
   useEffect(() => {
@@ -256,8 +431,11 @@ export default function CityListScreen() {
     });
   }, [isSelectionMode]);
   const searchRowAnimStyle = useAnimatedStyle(() => ({
-    height: searchRowProgress.value * searchRowHeight,
     opacity: searchRowProgress.value,
+    transform: [{ translateY: -(1 - searchRowProgress.value) * (searchRowHeight * 0.45) }],
+  }));
+  const listShiftAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: -(1 - searchRowProgress.value) * searchRowHeight }],
   }));
 
   // Delete bar. It stays mounted for the whole screen lifetime and is only
@@ -370,6 +548,11 @@ export default function CityListScreen() {
       flexShrink: 1,
     },
     searchRow: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      zIndex: 5,
       flexDirection: 'row',
       paddingHorizontal: fs.spacing,
       paddingTop: fs.spacing * 0.5,
@@ -573,35 +756,59 @@ export default function CityListScreen() {
   }), [theme, fs, insets]);
 
   useEffect(() => {
-    // Deferred past the first frames so the push transition owns them
-    // (double requestAnimationFrame replaces the deprecated
-    // InteractionManager.runAfterInteractions — same effect, no warning).
-    // Storage read is fast, so the cached list paints almost instantly;
-    // network refresh lands in the background afterwards. Cancelled on
-    // unmount/language switch.
+    if (listMounted) {
+      cachedCities = cities;
+    }
+  }, [cities, listMounted]);
+
+  useEffect(() => {
+    if (listMounted) {
+      cachedCurrentLocation = currentLocation;
+    }
+  }, [currentLocation, listMounted]);
+
+  useEffect(() => {
+    // Wait for the native slide_from_right push transition to finish before
+    // inflating FlatList + Reanimated cards and kicking off storage/network/GPS
+    // work. Previously double-rAF fired at ~22ms mid-slide and swallowed the
+    // first ~90ms of the transition (causing an abrupt jump to ~25% width).
     let cancelled = false;
-    let raf1 = 0;
-    let raf2 = 0;
-    raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
-        if (cancelled) return;
-        setListMounted(true);
-        loadSavedCitiesAndRefresh();
-        loadCurrentLocation();
-        (async () => {
-          try {
-            const v = await AsyncStorage.getItem(CONFIRM_DELETE_KEY);
-            setConfirmDelete(v === null ? true : v === 'true');
-          } catch (e) {}
-        })();
-      });
+    let settled = false;
+    const settle = () => {
+      if (cancelled || settled) return;
+      settled = true;
+      didInitialSettleRef.current = true;
+      if (!listMountedRef.current) setListMounted(true);
+      loadSavedCitiesAndRefresh();
+      loadCurrentLocation();
+      (async () => {
+        try {
+          const v = await AsyncStorage.getItem(CONFIRM_DELETE_KEY);
+          if (cancelled) return;
+          const next = v === null ? true : v === 'true';
+          cachedConfirmDelete = next;
+          setConfirmDelete((prev) => (prev === next ? prev : next));
+        } catch (e) {}
+      })();
+    };
+
+    if (didInitialSettleRef.current) {
+      // Language switched while screen is already mounted: refresh right away.
+      settle();
+      return () => { cancelled = true; };
+    }
+
+    const unsubscribe = navigation.addListener('transitionEnd', (e) => {
+      if (!e?.data?.closing) settle();
     });
+    // Fallback if OS animations are disabled (transitionEnd may not fire).
+    const fallbackTimer = setTimeout(settle, 420);
     return () => {
       cancelled = true;
-      cancelAnimationFrame(raf1);
-      cancelAnimationFrame(raf2);
+      unsubscribe();
+      clearTimeout(fallbackTimer);
     };
-  }, [i18n.language]);
+  }, [i18n.language, navigation]);
 
   // Import happened in Settings (list replaced on disk): reload once on
   // return. Runs in the background over the visible cached list, so no
@@ -620,12 +827,7 @@ export default function CityListScreen() {
     }, [])
   );
 
-  // Shared open-meteo enrichment for a coordinate pair. Returns the weather
-  // fields object or null (no usable data). fetchJson errors propagate so
-  // callers can apply their own offline/circuit-breaker policy.
-  // Provider layer: OM slim shape, 7Timer fallback normalized to the
-  // same contract (downstream field reads unchanged).
-  const fetchWeatherForCoords = async (lat, lon) => {
+  const fetchWeatherForCoords = async (lat, lon, fetchJson) => {
     const weatherData = await fetchForecast(
       lat,
       lon,
@@ -633,14 +835,20 @@ export default function CityListScreen() {
       `${BASE_URL}?latitude=${lat}&longitude=${lon}&current_weather=true&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto`
     );
     if (!weatherData || !weatherData.current_weather) return null;
-    const temp = Math.round(weatherData.current_weather.temperature);
-    const min = weatherData.daily?.temperature_2m_min ? Math.round(weatherData.daily.temperature_2m_min[0]) : '';
-    const max = weatherData.daily?.temperature_2m_max ? Math.round(weatherData.daily.temperature_2m_max[0]) : '';
+    const rawTemp = weatherData.current_weather.temperature;
+    const tempC = typeof rawTemp === 'number' && Number.isFinite(rawTemp) ? rawTemp : null;
+    const rawMin = weatherData.daily?.temperature_2m_min?.[0];
+    const rawMax = weatherData.daily?.temperature_2m_max?.[0];
+    const minC = typeof rawMin === 'number' && Number.isFinite(rawMin) ? rawMin : null;
+    const maxC = typeof rawMax === 'number' && Number.isFinite(rawMax) ? rawMax : null;
     const code = weatherData.current_weather.weathercode;
     const isNight = weatherData.current_weather.is_day === 0;
     return {
-      temp: `${temp}`,
-      minMax: min !== '' && max !== '' ? `${max}° / ${min}°` : '',
+      tempC,
+      minC,
+      maxC,
+      temp: tempC !== null ? `${Math.round(tempC)}` : '–',
+      minMax: minC !== null && maxC !== null ? `${Math.round(maxC)}° / ${Math.round(minC)}°` : '',
       condition: getWeatherConditionText(code),
       weathercode: code,
       isNight,
@@ -648,8 +856,18 @@ export default function CityListScreen() {
   };
 
   const loadSavedCitiesAndRefresh = async () => {
+    const seq = ++refreshSeqRef.current;
+    if (refreshAbortRef.current) {
+      try { refreshAbortRef.current.abort(); } catch (e) {}
+    }
+    const controller = new AbortController();
+    refreshAbortRef.current = controller;
+    const fetchJson = makeCityFetchJson(controller.signal, FETCH_TIMEOUT_MS, 1);
+    const probeFetch = makeCityFetchJson(controller.signal, 5000, 0);
+
     try {
       const data = await AsyncStorage.getItem(SAVED_CITIES_KEY);
+      if (!mountedRef.current || seq !== refreshSeqRef.current) return;
       let list = [];
       if (data) {
         try {
@@ -659,9 +877,9 @@ export default function CityListScreen() {
         }
       } else {
         list = [
-          { id: '1', name: 'Москва' },
-          { id: '2', name: 'Санкт-Петербург' },
-          { id: '3', name: 'Сочи' },
+          { id: '1', name: 'Москва', latitude: 55.7558, longitude: 37.6173 },
+          { id: '2', name: 'Санкт-Петербург', latitude: 59.9343, longitude: 30.3351 },
+          { id: '3', name: 'Сочи', latitude: 43.5974, longitude: 39.7154 },
         ];
       }
 
@@ -684,62 +902,42 @@ export default function CityListScreen() {
           return { ...city, id };
         });
       }
-      // Optimistic paint: cached cities (with last-known weather) hit the
-      // screen instantly — no full-screen spinner. The probe + per-city
-      // refresh below runs in the background and swaps data in on arrival
-      // (same setCities path, no full reload). Skeleton only when there is
-      // genuinely nothing to show yet.
       if (list.length > 0) {
         setCities(list);
       } else {
         setIsLoading(true);
       }
-      
+
       const currentLang = i18n.language || 'ru';
-      // No NetInfo fast-fail (it reports the VPN tunnel, not reachability).
-      // The probe below is the real connectivity test: true offline fails
-      // it in 5s and shows the stored list; a lying "offline" never blocks.
-      const showStored = () => setCities(list);
-      // Real connectivity test through the SAME provider layer the loop
-      // uses (OM-first with 7Timer fallback, 5s per leg). Probing OM alone
-      // used to misclassify a blocked OM host as "offline" and skip the
-      // refresh that the fallback would have fulfilled (the 0° cards bug).
-      // Only when BOTH legs are dead do we show stored data. Bonus: a
-      // failed OM leg trips the circuit breaker, so the loop below skips
-      // straight to fallback instead of burning timeouts per city.
+      const showStored = () => {
+        if (mountedRef.current && seq === refreshSeqRef.current) setCities(list);
+      };
       try {
         await fetchForecast(
           55.75,
           37.61,
-          (url) => fetchJson(url, 5000, 0),
+          probeFetch,
           `${BASE_URL}?latitude=55.75&longitude=37.61&current_weather=true&timezone=auto`
         );
       } catch (e) {
+        if (isExternalAbortError(e)) return;
         showStored();
         return;
       }
-      // Sequential refresh: parallel TLS handshakes through a VPN often
-      // fail with SSLHandshakeException, so go one city at a time.
-      // circuitOpen stops burning timeouts on the rest if the connection
-      // drops mid-refresh.
+      if (!mountedRef.current || seq !== refreshSeqRef.current) return;
+
       let circuitOpen = false;
       const updatedList = [];
       for (const city of list) {
+        if (!mountedRef.current || seq !== refreshSeqRef.current) return;
         if (circuitOpen) {
           updatedList.push(city);
           continue;
         }
         try {
-          // STRICT: a saved city's name is frozen at add time and is NEVER
-          // rewritten on refresh. Refresh uses stored coordinates only —
-          // no geocoding, no reverse-geocoding (both can return a district
-          // like "Прионежский район" or "Бор" instead of the real city).
           let lat = city.latitude;
           let lon = city.longitude;
-          if (lat === undefined || lon === undefined) {
-            // Legacy entry without coordinates: one explicit lookup.
-            // Region hits are ignored: a stored city must keep pointing
-            // at a real populated place, never at a country center.
+          if (typeof lat !== 'number' || typeof lon !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lon)) {
             const hit = await searchCity(city.name, currentLang, fetchJson);
             if (hit && !isRegionLike(hit)) {
               lat = hit.latitude;
@@ -747,8 +945,8 @@ export default function CityListScreen() {
             }
           }
 
-          if (lat !== undefined && lon !== undefined) {
-            const enrichment = await fetchWeatherForCoords(lat, lon);
+          if (typeof lat === 'number' && typeof lon === 'number' && Number.isFinite(lat) && Number.isFinite(lon)) {
+            const enrichment = await fetchWeatherForCoords(lat, lon, fetchJson);
             if (enrichment) {
               updatedList.push({
                 ...city,
@@ -761,9 +959,7 @@ export default function CityListScreen() {
             }
           }
         } catch (e) {
-          // Offline errors are expected: keep the stored data quietly
-          // instead of spamming LogBox warnings (one per city), and stop
-          // trying the remaining cities (circuit breaker).
+          if (isExternalAbortError(e)) return;
           if (!isOfflineError(e)) {
             console.warn(`Failed to refresh city ${city.name}:`, e?.message || e);
           } else {
@@ -773,55 +969,58 @@ export default function CityListScreen() {
         updatedList.push(city);
       }
 
-        // Merge enriched weather data into the CURRENT user order
-        // so any drag-and-drop reordering done while refreshing isn't wiped out.
-        const byId = new Map(updatedList.map(c => [c.id, c]));
-        const merged = citiesRef.current.map(c => byId.get(c.id) ?? c);
-        setCities(merged);
-        await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(merged));
+      if (!mountedRef.current || seq !== refreshSeqRef.current) return;
+      const byId = new Map(updatedList.map(c => [c.id, c]));
+      const merged = citiesRef.current.map(c => byId.get(c.id) ?? c);
+      setCities(merged);
+      await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(merged));
     } catch (e) {
-      console.error(e);
+      if (!isExternalAbortError(e)) console.error(e);
     } finally {
-      setIsLoading(false);
-      setRefreshing(false);
+      if (mountedRef.current && seq === refreshSeqRef.current) {
+        setIsLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
-  // GEOLOCATION STREAM (top card). Shows ONLY when coordinates were
-  // successfully resolved AND weather loaded. Any failure (denied permission,
-  // timeout, offline) -> null -> no card in the render tree at all.
-  // Runs on screen open and on pull-to-refresh, independent of the saved list.
+  // GEOLOCATION STREAM (top card). Uses requestPermission: false so opening
+  // CityList never spams an OS permission dialog when previously denied.
   const loadCurrentLocation = async () => {
     try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        setCurrentLocation(null);
+      const res = await acquireCurrentPosition(Location, {
+        requestPermission: false,
+        singleShotTimeoutMs: 5000,
+        watchTimeoutMs: 6000,
+      });
+      if (res.status !== 'granted' || !res.position?.coords || !mountedRef.current) {
+        if (mountedRef.current) setCurrentLocation(null);
         return;
       }
-      const position = await Promise.race([
-        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('location timeout')), 12000)),
-      ]);
-      const { latitude, longitude } = position.coords;
+      const { latitude, longitude } = res.position.coords;
       const currentLang = i18n.language || 'ru';
-      const enrichment = await fetchWeatherForCoords(latitude, longitude);
+      const locFetch = makeCityFetchJson(refreshAbortRef.current?.signal, FETCH_TIMEOUT_MS, 1);
+      const revFetch = makeCityFetchJson(refreshAbortRef.current?.signal, 4000, 0);
+      const [enrichment, resolved] = await Promise.all([
+        fetchWeatherForCoords(latitude, longitude, locFetch),
+        resolvePlaceName(latitude, longitude, currentLang, revFetch),
+      ]);
+      if (!mountedRef.current) return;
       if (!enrichment) {
         setCurrentLocation(null);
         return;
       }
-      // Shared chain (native -> Open-Meteo -> BigDataCloud). Total miss
-      // keeps the old behavior: coordinate string, card non-tappable.
-      const resolved = await resolvePlaceName(latitude, longitude, currentLang, fetchJson);
       setCurrentLocation({
         id: '__current_location__',
         name: resolved?.name ?? `${latitude.toFixed(2)}, ${longitude.toFixed(2)}`,
+        country: resolved?.country || '',
         latitude,
         longitude,
         isCoordinateFallback: !resolved,
         ...enrichment,
       });
     } catch (e) {
-      setCurrentLocation(null);
+      if (mountedRef.current && !isExternalAbortError(e)) setCurrentLocation(null);
     }
   };
 
@@ -871,98 +1070,52 @@ export default function CityListScreen() {
     if (!searchQuery.trim()) return;
     const cityName = searchQuery.trim();
     const currentLang = i18n.language || 'ru';
+    const addFetch = makeCityFetchJson(undefined, FETCH_TIMEOUT_MS, 1);
     try {
       setIsLoading(true);
-      // searchQuery is captured in cityName up front and reused for every
-      // fallback step, so the retries use the exact same input.
-      // 1. Current language -> 2. English -> 3. transliterated variants.
-      const hit = await searchCity(cityName, currentLang, fetchJson);
+      const hit = await searchCity(cityName, currentLang, addFetch);
 
       if (!hit) {
         Alert.alert(t('cities.error'), t('cities.city_not_found'));
-        setIsLoading(false);
         return;
       }
       if (isRegionLike(hit)) {
         Alert.alert(t('cities.error'), t('enterCityNotCountry'));
-        setIsLoading(false);
         return;
       }
-      const { latitude, longitude, name } = hit;
-      const weatherData = await fetchForecast(
-        latitude,
-        longitude,
-        fetchJson,
-        `${BASE_URL}?latitude=${latitude}&longitude=${longitude}&current_weather=true&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto`
-      );
-      const temp = weatherData?.current_weather ? Math.round(weatherData.current_weather.temperature) : 0;
-      const min = weatherData?.daily?.temperature_2m_min ? Math.round(weatherData.daily.temperature_2m_min[0]) : '';
-      const max = weatherData?.daily?.temperature_2m_max ? Math.round(weatherData.daily.temperature_2m_max[0]) : '';
-      const code = weatherData?.current_weather?.weathercode || 0;
-      const isNight = weatherData?.current_weather?.is_day === 0;
-
-      const newCity = {
-        id: Date.now().toString(),
-        name: name || cityName,
-        latitude,
-        longitude,
-        temp: `${temp}`,
-        minMax: min !== '' && max !== '' ? `${max}° / ${min}°` : '',
-        condition: getWeatherConditionText(code),
-        weathercode: code,
-        isNight,
-      };
-
-      const isDuplicate = cities.some(
-        c => c.name?.trim().toLowerCase() === (name || cityName).trim().toLowerCase()
+      const { latitude, longitude, name, country } = hit;
+      const resolvedName = name || cityName;
+      const isDuplicate = citiesRef.current.some(
+        c => c.name?.trim().toLowerCase() === resolvedName.trim().toLowerCase()
       );
       if (isDuplicate) {
-        Alert.alert(t('cities.notice') || '', t('cities.already_added') || 'Город уже в списке');
+        Alert.alert(t('cities.notice'), t('cities.already_added'));
         setSearchQuery('');
         return;
       }
 
-      const updated = [...cities, newCity];
+      const enrichment = await fetchWeatherForCoords(latitude, longitude, addFetch);
+      const newCity = {
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        name: resolvedName,
+        country: country || '',
+        latitude,
+        longitude,
+        ...(enrichment || { temp: '–', minMax: '', condition: getWeatherConditionText(0), weathercode: 0, isNight: false }),
+      };
+
+      const updated = [...citiesRef.current, newCity];
       setCities(updated);
       await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(updated));
       setSearchQuery('');
     } catch (e) {
       Alert.alert(t('cities.error'), t('cities.add_failed'));
     } finally {
-      setIsLoading(false);
+      if (mountedRef.current) setIsLoading(false);
     }
   };
 
-  const handleLongPressCity = (id, name, index) => {
-    if (!isSelectionMode) {
-      // Long-press only OPENS the editor. Nothing is pre-selected: the user
-      // decides which cards to delete by tapping their checkboxes.
-      setIsSelectionMode(true);
-      setSelectedCities(new Set());
-    } else {
-      toggleSelectCity(id);
-    }
-  };
-
-  const handlePressCity = (id, name, index) => {
-    if (isSelectionMode) {
-      toggleSelectCity(id);
-    } else {
-      handleSelectCity(name);
-    }
-  };
-
-  const moveCity = async (fromIndex, toIndex) => {
-    if (fromIndex === 0 || toIndex === 0) return; // index 0 is protected
-    if (toIndex < 1 || toIndex >= cities.length) return;
-    const newCities = [...cities];
-    const [moved] = newCities.splice(fromIndex, 1);
-    newCities.splice(toIndex, 0, moved);
-    setCities(newCities);
-    await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(newCities));
-  };
-
-  const toggleSelectCity = (id) => {
+  const toggleSelectCity = useCallback((id) => {
     setSelectedCities(prev => {
       const next = new Set(prev);
       if (next.has(id)) {
@@ -972,31 +1125,72 @@ export default function CityListScreen() {
       }
       return next;
     });
-  };
+  }, []);
 
+  const handleSelectCity = useCallback(async (cityName, latitude, longitude, country) => {
+    try {
+      await AsyncStorage.setItem(LAST_SELECTED_CITY_KEY, cityName);
+      // Use unified `city` key (same as WeatherPhenomenonFinder) so an older
+      // `city` param never shadows `selectedCity`, and pass `{ pop: true }`
+      // so React Navigation v7 returns to the EXISTING Tabs screen instead of
+      // pushing a duplicate Tabs instance onto the stack.
+      const params = {
+        city: cityName,
+        selectedCity: cityName,
+        country: country || undefined,
+        ts: Date.now(),
+      };
+      if (typeof latitude === 'number' && typeof longitude === 'number' && Number.isFinite(latitude) && Number.isFinite(longitude)) {
+        params.latitude = latitude;
+        params.longitude = longitude;
+      } else {
+        params.latitude = undefined;
+        params.longitude = undefined;
+      }
+      navigation.navigate('Tabs', { screen: 'weather', params }, { pop: true });
+    } catch (e) {
+      navigation.navigate('Tabs', { screen: 'weather' }, { pop: true });
+    }
+  }, [navigation]);
 
+  const handleLongPressCity = useCallback((id) => {
+    if (!isSelectionMode) {
+      setIsSelectionMode(true);
+      setSelectedCities(new Set());
+    } else {
+      toggleSelectCity(id);
+    }
+  }, [isSelectionMode, toggleSelectCity]);
 
-  const cancelSelectionMode = () => {
+  const handlePressCity = useCallback((id, name) => {
+    if (isSelectionMode) {
+      toggleSelectCity(id);
+    } else {
+      const found = citiesRef.current.find((c) => c.id === id);
+      handleSelectCity(name, found?.latitude, found?.longitude, found?.country);
+    }
+  }, [isSelectionMode, toggleSelectCity, handleSelectCity]);
+
+  const cancelSelectionMode = useCallback(() => {
     setIsSelectionMode(false);
     setSelectedCities(new Set());
-  };
+  }, []);
 
   const allSelected = cities.length > 0 && selectedCities.size === cities.length;
 
-  const toggleSelectAll = () => {
+  const toggleSelectAll = useCallback(() => {
     if (allSelected) {
       setSelectedCities(new Set());
     } else {
-      setSelectedCities(new Set(cities.map((c) => c.id)));
+      setSelectedCities(new Set(citiesRef.current.map((c) => c.id)));
     }
-  };
+  }, [allSelected]);
 
   const handlePromptBatchDelete = () => {
     if (selectedCities.size === 0) return;
     if (confirmDelete) {
       setDeleteTarget({ count: selectedCities.size });
     } else {
-      // Confirmation disabled in Settings — delete immediately.
       handleConfirmDelete();
     }
   };
@@ -1004,7 +1198,7 @@ export default function CityListScreen() {
   const handleConfirmDelete = async () => {
     if (isSelectionMode) {
       if (selectedCities.size === 0) return;
-      const updated = cities.filter(c => !selectedCities.has(c.id));
+      const updated = citiesRef.current.filter(c => !selectedCities.has(c.id));
       setCities(updated);
       await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(updated));
       setIsSelectionMode(false);
@@ -1012,33 +1206,23 @@ export default function CityListScreen() {
       setDeleteTarget(null);
     } else {
       if (!deleteTarget) return;
-      const updated = cities.filter(c => c.id !== deleteTarget.id);
+      const updated = citiesRef.current.filter(c => c.id !== deleteTarget.id);
       setCities(updated);
       await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(updated));
       setDeleteTarget(null);
     }
   };
 
-  const handleCancelDelete = () => {
+  const handleCancelDelete = useCallback(() => {
     setDeleteTarget(null);
-  };
-
-  const handleSelectCity = async (cityName) => {
-    try {
-      await AsyncStorage.setItem(LAST_SELECTED_CITY_KEY, cityName);
-      navigation.navigate('Tabs', { screen: 'weather', params: { selectedCity: cityName } });
-    } catch (e) {
-      navigation.navigate('Tabs', { screen: 'weather' });
-    }
-  };
+  }, []);
 
   // NOTE: rows intentionally carry NO entering animation. A per-row
-  // Animated wrapper destabilized the drag system on-device (re-mounts
-  // and entering/layout interplay around the draggable cards); the list
+  // Animated wrapper destabilized the drag system on-device; the list
   // entrance is animated once at the container level below instead.
-  const renderItem = ({ item, index }) => {
+  const renderItem = useCallback(({ item, index }) => {
     return (
-       <DraggableCityCard
+      <DraggableCityCard
         item={item}
         index={index}
         isSelectionMode={isSelectionMode}
@@ -1046,6 +1230,7 @@ export default function CityListScreen() {
         theme={theme}
         fs={fs}
         t={t}
+        tempUnit={tempUnit}
         onSelectToggle={handlePressCity}
         onLongPressCity={handleLongPressCity}
         dragOffset={dragOffset}
@@ -1057,10 +1242,45 @@ export default function CityListScreen() {
         trace={trace}
         released={released}
         order={order}
-         itemCount={cities.length}
-       />
+        itemCount={cities.length}
+      />
     );
-  };
+  }, [
+    isSelectionMode, selectedCities, theme, fs, t, tempUnit,
+    handlePressCity, handleLongPressCity, dragOffset, activeIndex, activeId,
+    beginDrag, endDrag, commitReorder, trace, released, order, cities.length,
+  ]);
+
+  const keyExtractor = useCallback((item, index) => String(item?.id ?? index), []);
+
+  const hasInitialLocationRef = useRef(cachedCurrentLocation !== null);
+  const handleSelectCurrentLocation = useCallback(() => {
+    if (!currentLocation || currentLocation.isCoordinateFallback) return;
+    handleSelectCity(
+      currentLocation.name,
+      currentLocation.latitude,
+      currentLocation.longitude,
+      currentLocation.country,
+    );
+  }, [currentLocation, handleSelectCity]);
+
+  const listHeaderElement = useMemo(() => (
+    <View>
+      <CurrentLocationReveal
+        currentLocation={currentLocation}
+        initialVisible={hasInitialLocationRef.current}
+        styles={styles}
+        t={t}
+        theme={theme}
+        fs={fs}
+        tempUnit={tempUnit}
+        onPress={handleSelectCurrentLocation}
+      />
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionHeaderText}>{t('cities.saved_cities')}</Text>
+      </View>
+    </View>
+  ), [currentLocation, styles, t, theme, fs, tempUnit, handleSelectCurrentLocation]);
 
   return (
     <ScreenWrapper contentStyle={{ paddingTop: Math.max(insets.top - 12, 0) }}>
@@ -1074,7 +1294,7 @@ export default function CityListScreen() {
         >
           <Ionicons name={isSelectionMode ? "close" : "arrow-back"} size={22} color={theme.text} />
         </PressableScale>
-        <Text
+        <Animated.Text
           style={[styles.headerTitle, { color: theme.text }, headerTitleAnimStyle]}
           numberOfLines={1}
           ellipsizeMode="tail"
@@ -1082,132 +1302,148 @@ export default function CityListScreen() {
           minimumFontScale={0.8}
         >
           {isSelectionMode ? getPluralSelectedText(selectedCities.size, t) : t('cities.title')}
-        </Text>
+        </Animated.Text>
         {isSelectionMode && (
           <PressableScale onPress={toggleSelectAll} style={{ paddingHorizontal: fs.spacing * 0.5 }} scaleTo={0.94}>
-            <Text style={{ color: theme.tint || '#3a7bd5', fontSize: fs.base, fontWeight: '600' }}>
+            <Text style={{ color: theme.accent, fontSize: fs.base, fontWeight: '600' }}>
               {allSelected ? t('cities.deselect_all') : t('cities.select_all')}
             </Text>
           </PressableScale>
         )}
       </View>
 
-      {/* Search / Add Bar (height collapses smoothly in selection mode) */}
-      <Animated.View
-        style={[styles.searchRow, searchRowAnimStyle]}
-        pointerEvents={isSelectionMode ? 'none' : 'auto'}
-      >
-        <TextInput
-          style={[styles.input, { backgroundColor: theme.surfaceRaised, color: theme.text, borderColor: theme.border }]}
-          placeholder={t('cities.add_placeholder')}
-          placeholderTextColor={theme.textMuted}
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          onSubmitEditing={handleAddCity}
-          editable={!isSelectionMode}
-        />
-        <PressableScale
-          style={[styles.addButton, { backgroundColor: theme.tint || '#3a7bd5' }]}
-          onPress={handleAddCity}
-          scaleTo={0.9}
-          haptic
-        >
-          <Ionicons name="add" size={24} color="#FFFFFF" />
-        </PressableScale>
-      </Animated.View>
-
-      {!listMounted ? (
-        <View style={{ flex: 1 }} />
-      ) : isLoading && cities.length === 0 ? (
-        <View style={{ flex: 1, paddingHorizontal: fs.spacing, paddingTop: fs.spacing * 0.5 }}>
-          <SkeletonCard theme={theme} fs={fs} />
-          <SkeletonCard theme={theme} fs={fs} />
-          <SkeletonCard theme={theme} fs={fs} />
-        </View>
-      ) : (
-        // Single entrance animation for the whole list (fade + slight
-        // rise, 300ms ease-out). It plays on every mount of this branch —
-        // which coincides exactly with the list appearing (fresh open,
-        // spinner -> data flip, offline restore). Refreshes, scroll
-        // mounts and selection changes never remount it, so no replays.
-        // Rows themselves stay animation-free: drag physics untouched.
+      <View style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+        {/* Search / Add Bar (slides/fades out on GPU in selection mode) */}
         <Animated.View
-          entering={
-            FadeInUp.duration(300)
-              .easing(Easing.out(Easing.quad))
-              .withInitialValues({ opacity: 0, transform: [{ translateY: 12 }] })
-          }
-          style={{ flex: 1 }}
+          style={[styles.searchRow, { height: searchRowHeight }, searchRowAnimStyle]}
+          pointerEvents={isSelectionMode ? 'none' : 'auto'}
         >
-          <DragCellContext.Provider value={dragCellValue}>
-          <FlatList
-            data={renderList}
-            keyExtractor={(item, index) => String(item?.id ?? index)}
-            renderItem={renderItem}
-            CellRendererComponent={DragCell}
-            // Cards are placed by transforms; clipping by layout bounds
-            // could detach a card that is visually on screen.
-            removeClippedSubviews={false}
-            ListHeaderComponent={
-              <View>
-                {currentLocation ? (
-                  <View>
-                    <View style={[styles.sectionHeader, { paddingTop: 8 }]}>
-                      <Text style={styles.sectionHeaderText}>{t('cities.current_location')}</Text>
-                    </View>
-                    <CurrentLocationCard
-                      item={currentLocation}
-                      theme={theme}
-                      fs={fs}
-                      t={t}
-                      style={{ marginBottom: fs.spacing * 0.6 }}
-                      onPress={currentLocation.isCoordinateFallback
-                        ? undefined
-                        : () => handleSelectCity(currentLocation.name)}
-                    />
-                  </View>
-                ) : null}
-                <View style={styles.sectionHeader}>
-                  <Text style={styles.sectionHeaderText}>{t('cities.saved_cities')}</Text>
-                </View>
-              </View>
-            }
-            ListEmptyComponent={
-              <Text style={styles.emptyListText}>{t('cities.empty_list')}</Text>
-            }
-            style={{ flex: 1 }}
-            scrollEnabled={!isDragging}
-            contentContainerStyle={[
-              styles.listContainer,
-              // Reserve the delete-bar space for the WHOLE selection session,
-              // not only after the first checkbox. Changing the content height
-              // at the same moment the search row collapses made the ScrollView
-              // re-clamp (visible jump) when the list was scrolled to the bottom.
-              isSelectionMode && { paddingBottom: 110 },
-            ]}
-            showsVerticalScrollIndicator={false}
-            // RefreshControl MUST stay mounted for the whole screen lifetime.
-            // On Android RN wraps the ScrollView in a SwipeRefreshLayout only
-            // when this prop is set; swapping element <-> undefined changes
-            // the root component type and remounts the native ScrollView and
-            // every cell (visible flash when entering/leaving selection
-            // mode). Keeping it mounted and disabling it avoids the remount.
-            refreshControl={
-              <RefreshControl
-                refreshing={refreshing}
-                enabled={!isSelectionMode}
-                onRefresh={() => {
-                  if (isSelectionMode) return;
-                  setRefreshing(true);
-                  loadSavedCitiesAndRefresh();
-                  loadCurrentLocation();
-                }}
-              />
-            }
+          <TextInput
+            style={[styles.input, { backgroundColor: theme.surfaceRaised, color: theme.text, borderColor: theme.border }]}
+            placeholder={t('cities.add_placeholder')}
+            placeholderTextColor={theme.textMuted}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            onSubmitEditing={handleAddCity}
+            editable={!isSelectionMode}
           />
-          </DragCellContext.Provider>
+          <PressableScale
+            style={[styles.addButton, { backgroundColor: theme.accent }]}
+            onPress={handleAddCity}
+            scaleTo={0.9}
+            haptic
+          >
+            <Ionicons name="add" size={24} color={theme.onAccent || '#FFFFFF'} />
+          </PressableScale>
         </Animated.View>
-      )}
+
+        <Animated.View style={[{ flex: 1, paddingTop: searchRowHeight, marginBottom: -searchRowHeight }, listShiftAnimStyle]}>
+          {!listMounted ? (
+            cities.length > 0 ? (
+              <View style={[styles.listContainer, { flex: 1, overflow: 'hidden' }]} pointerEvents="none">
+                {listHeaderElement}
+                {cities.slice(0, currentLocation ? 5 : 6).map((item) => (
+                  <StaticCityCardPreview
+                    key={item.id}
+                    item={item}
+                    fs={fs}
+                    t={t}
+                    tempUnit={tempUnit}
+                  />
+                ))}
+              </View>
+            ) : (
+              <View style={{ flex: 1 }} />
+            )
+          ) : isLoading && cities.length === 0 ? (
+            <View style={{ flex: 1, paddingHorizontal: fs.spacing, paddingTop: fs.spacing * 0.5 }}>
+              <SkeletonCard theme={theme} fs={fs} />
+              <SkeletonCard theme={theme} fs={fs} />
+              <SkeletonCard theme={theme} fs={fs} />
+            </View>
+          ) : (
+            (hasInitialCacheRef.current ? (
+              <View style={{ flex: 1 }}>
+                <DragCellContext.Provider value={dragCellValue}>
+                <FlatList
+                  data={renderList}
+                  keyExtractor={keyExtractor}
+                  renderItem={renderItem}
+                  CellRendererComponent={DragCell}
+                  initialNumToRender={12}
+                  maxToRenderPerBatch={8}
+                  windowSize={11}
+                  // Cards are placed by transforms; clipping by layout bounds
+                  // could detach a card that is visually on screen.
+                  removeClippedSubviews={false}
+                  ListHeaderComponent={listHeaderElement}
+                  ListEmptyComponent={
+                    <Text style={styles.emptyListText}>{t('cities.empty_list')}</Text>
+                  }
+                  style={{ flex: 1 }}
+                  scrollEnabled={!isDragging}
+                  contentContainerStyle={[
+                    styles.listContainer,
+                    { paddingBottom: (isSelectionMode ? 110 : fs.spacing * 1.75) + searchRowHeight },
+                  ]}
+                  showsVerticalScrollIndicator={false}
+                  refreshControl={
+                    <RefreshControl
+                      refreshing={refreshing}
+                      enabled={!isSelectionMode}
+                      onRefresh={() => {
+                        if (isSelectionMode) return;
+                        setRefreshing(true);
+                        loadSavedCitiesAndRefresh();
+                        loadCurrentLocation();
+                      }}
+                    />
+                  }
+                />
+                </DragCellContext.Provider>
+              </View>
+            ) : (
+              <FadeSlideIn duration={240} distance={10} style={{ flex: 1 }}>
+                <DragCellContext.Provider value={dragCellValue}>
+                <FlatList
+                  data={renderList}
+                  keyExtractor={keyExtractor}
+                  renderItem={renderItem}
+                  CellRendererComponent={DragCell}
+                  initialNumToRender={12}
+                  maxToRenderPerBatch={8}
+                  windowSize={11}
+                  removeClippedSubviews={false}
+                  ListHeaderComponent={listHeaderElement}
+                  ListEmptyComponent={
+                    <Text style={styles.emptyListText}>{t('cities.empty_list')}</Text>
+                  }
+                  style={{ flex: 1 }}
+                  scrollEnabled={!isDragging}
+                  contentContainerStyle={[
+                    styles.listContainer,
+                    { paddingBottom: (isSelectionMode ? 110 : fs.spacing * 1.75) + searchRowHeight },
+                  ]}
+                  showsVerticalScrollIndicator={false}
+                  refreshControl={
+                    <RefreshControl
+                      refreshing={refreshing}
+                      enabled={!isSelectionMode}
+                      onRefresh={() => {
+                        if (isSelectionMode) return;
+                        setRefreshing(true);
+                        loadSavedCitiesAndRefresh();
+                        loadCurrentLocation();
+                      }}
+                    />
+                  }
+                />
+                </DragCellContext.Provider>
+              </FadeSlideIn>
+            ))
+          )}
+        </Animated.View>
+      </View>
 
       {/* Persistent delete bar: mounted always, shown/hidden by shared value
           (opacity + slide). No mount/unmount layout animation => no flash. */}
@@ -1229,13 +1465,15 @@ export default function CityListScreen() {
         </PressableScale>
       </Animated.View>
 
-      <ConfirmDeleteModal
-        visible={deleteTarget !== null}
-        cityName={deleteTarget?.name}
-        count={deleteTarget?.count || selectedCities.size}
-        onCancel={handleCancelDelete}
-        onConfirm={handleConfirmDelete}
-      />
+      {deleteTarget !== null && (
+        <ConfirmDeleteModal
+          visible={true}
+          cityName={deleteTarget?.name}
+          count={deleteTarget?.count || selectedCities.size}
+          onCancel={handleCancelDelete}
+          onConfirm={handleConfirmDelete}
+        />
+      )}
     </ScreenWrapper>
   );
 }

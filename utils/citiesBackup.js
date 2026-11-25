@@ -11,6 +11,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import { getAppStorageRoot, ensureDir } from './appStorage';
+import { parseAndSanitizeCitiesBackup, DEFAULT_MAX_CITIES } from './citiesBackupParser';
 
 // Must match the key in CityListScreen.js. Kept duplicated (not imported)
 // to avoid a CityListScreen <-> citiesBackup import cycle.
@@ -35,7 +36,7 @@ async function ensureBackupDir() {
 function stamp() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
 export async function exportCities() {
@@ -46,16 +47,25 @@ export async function exportCities() {
   } catch (e) {
     stored = [];
   }
-  const cities = (Array.isArray(stored) ? stored : [])
-    .map((c) => {
-      const o = { name: String(c?.name || '').trim().slice(0, 100) };
-      if (Number.isFinite(c?.latitude) && Number.isFinite(c?.longitude)) {
-        o.latitude = c.latitude;
-        o.longitude = c.longitude;
-      }
-      return o;
-    })
-    .filter((c) => c.name);
+  const seen = new Set();
+  const cities = [];
+  for (const c of Array.isArray(stored) ? stored : []) {
+    if (cities.length >= DEFAULT_MAX_CITIES) break;
+    const name = String(c?.name || '').replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, 100);
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const o = { name };
+    if (
+      typeof c?.latitude === 'number' && Number.isFinite(c.latitude) && c.latitude >= -90 && c.latitude <= 90 &&
+      typeof c?.longitude === 'number' && Number.isFinite(c.longitude) && c.longitude >= -180 && c.longitude <= 180
+    ) {
+      o.latitude = c.latitude;
+      o.longitude = c.longitude;
+    }
+    cities.push(o);
+  }
   const dir = await ensureBackupDir();
   const payload = JSON.stringify({
     app: 'MyWeather',
@@ -96,33 +106,16 @@ export async function deleteBackupFile(path) {
   await FileSystem.deleteAsync(path, { idempotent: true });
 }
 
+export async function previewCitiesFromUri(uri) {
+  const text = await FileSystem.readAsStringAsync(uri);
+  const { count, skipped, total } = parseAndSanitizeCitiesBackup(text, { maxCities: MAX_CITIES });
+  return { count, skipped, total };
+}
+
 export async function importCitiesFromUri(uri) {
   const text = await FileSystem.readAsStringAsync(uri);
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (e) {
-    throw new Error('bad-file');
-  }
-  // Accept both { cities: [...] } and a bare [...] array.
-  const arr = Array.isArray(parsed) ? parsed : parsed?.cities;
-  if (!Array.isArray(arr)) throw new Error('bad-file');
-  const cities = [];
-  for (const c of arr) {
-    if (cities.length >= MAX_CITIES) break;
-    const name = String(c?.name || '').trim().slice(0, 100);
-    if (!name) continue;
-    const o = { id: `${Date.now().toString(36)}-${cities.length}`, name };
-    const lat = Number(c?.latitude);
-    const lon = Number(c?.longitude);
-    if (Number.isFinite(lat) && Number.isFinite(lon)) {
-      o.latitude = lat;
-      o.longitude = lon;
-    }
-    cities.push(o);
-  }
-  if (cities.length === 0) throw new Error('bad-file');
+  const { cities, count, skipped } = parseAndSanitizeCitiesBackup(text, { maxCities: MAX_CITIES });
   await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(cities));
   await AsyncStorage.setItem(CITIES_CHANGED_KEY, '1');
-  return { count: cities.length, skipped: arr.length - cities.length };
+  return { count, skipped };
 }

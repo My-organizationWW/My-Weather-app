@@ -35,6 +35,25 @@ function verdictColor(verdict, theme) {
   return theme.danger;
 }
 
+function formatVerdictText(r, t) {
+  switch (r.verdict) {
+    case 'ok':
+      return `${t('netdiagOk')} · ${r.ms} ms`;
+    case 'timeout':
+      return t('netdiagTimeout');
+    case 'dns':
+      return t('netdiagDns');
+    case 'blocked':
+      return t('netdiagBlocked');
+    case 'http':
+      return `${t('netdiagHttp')} ${r.detail ?? ''}`.trim();
+    case 'offline':
+      return t('netdiagOffline');
+    default:
+      return '…';
+  }
+}
+
 // One probe row. The row itself rises in once on mount; the verdict text
 // gets its own short fade when the result for this endpoint arrives, so
 // rows "fill in" live instead of snapping from spinner to label.
@@ -74,24 +93,6 @@ function ProbeRow({ ep, result, index, t, theme, fs }) {
   }, [result, verdictOpacity]);
 
   const color = result ? verdictColor(result.verdict, theme) : theme.textMuted;
-  const verdictText = (r) => {
-    switch (r.verdict) {
-      case 'ok':
-        return `${t('netdiagOk')} · ${r.ms} ms`;
-      case 'timeout':
-        return t('netdiagTimeout');
-      case 'dns':
-        return t('netdiagDns');
-      case 'blocked':
-        return t('netdiagBlocked');
-      case 'http':
-        return `${t('netdiagHttp')} ${r.detail ?? ''}`.trim();
-      case 'offline':
-        return t('netdiagOffline');
-      default:
-        return '…';
-    }
-  };
 
   return (
     <Animated.View
@@ -112,7 +113,7 @@ function ProbeRow({ ep, result, index, t, theme, fs }) {
         <Animated.Text
           style={[styles.verdict, { color, fontSize: fs.base * 0.8, opacity: verdictOpacity }]}
         >
-          {verdictText(result)}
+          {formatVerdictText(result, t)}
         </Animated.Text>
       ) : (
         <ActivityIndicator size="small" color={theme.accent} />
@@ -129,26 +130,29 @@ export default function NetworkDiagnosticsScreen() {
   const [results, setResults] = useState({});
   const [running, setRunning] = useState(false);
   const [copied, setCopied] = useState(false);
-  const cancelled = useRef(false);
+  const abortRef = useRef(null);
+  const copyTimerRef = useRef(null);
   const runId = useRef(0);
 
   const startRun = useCallback(() => {
     const myId = ++runId.current;
-    cancelled.current = false;
+    if (abortRef.current) {
+      try { abortRef.current.abort(); } catch (e) {}
+    }
+    const controller = new AbortController();
+    abortRef.current = controller;
     setRunning(true);
     setResults({});
     setCopied(false);
     (async () => {
       for (const ep of NETPROBE_ENDPOINTS) {
-        if (cancelled.current || runId.current !== myId) break;
-        const r = await probeEndpoint(ep);
-        if (cancelled.current || runId.current !== myId) break;
+        if (controller.signal.aborted || runId.current !== myId) break;
+        const r = await probeEndpoint(ep, controller.signal);
+        if (controller.signal.aborted || runId.current !== myId || r.verdict === 'cancelled') break;
         setResults((prev) => ({ ...prev, [ep.id]: r }));
-        await sleep(INTER_PROBE_GAP_MS);
+        await sleep(INTER_PROBE_GAP_MS, controller.signal);
       }
-      // Only the owning generation clears the flag: a stale loop can
-      // neither leave it stuck nor steal it from a newer run.
-      if (runId.current === myId) setRunning(false);
+      if (runId.current === myId && !controller.signal.aborted) setRunning(false);
     })();
   }, []);
 
@@ -156,7 +160,13 @@ export default function NetworkDiagnosticsScreen() {
     useCallback(() => {
       startRun();
       return () => {
-        cancelled.current = true;
+        if (abortRef.current) {
+          try { abortRef.current.abort(); } catch (e) {}
+        }
+        if (copyTimerRef.current) {
+          clearTimeout(copyTimerRef.current);
+          copyTimerRef.current = null;
+        }
       };
     }, [startRun])
   );
@@ -175,34 +185,16 @@ export default function NetworkDiagnosticsScreen() {
   else if (anyOk) summary = t('netdiagSummaryPartial');
   else if (done) summary = t('netdiagSummaryDown');
 
-  const verdictText = (r) => {
-    switch (r.verdict) {
-      case 'ok':
-        return `${t('netdiagOk')} · ${r.ms} ms`;
-      case 'timeout':
-        return t('netdiagTimeout');
-      case 'dns':
-        return t('netdiagDns');
-      case 'blocked':
-        return t('netdiagBlocked');
-      case 'http':
-        return `${t('netdiagHttp')} ${r.detail ?? ''}`.trim();
-      case 'offline':
-        return t('netdiagOffline');
-      default:
-        return '…';
-    }
-  };
-
   const copyResults = async () => {
     const lines = NETPROBE_ENDPOINTS.map((ep) => {
       const r = results[ep.id];
-      return `${t(`netdiagEp_${ep.id}`)}: ${r ? verdictText(r) : '…'}`;
+      return `${t(`netdiagEp_${ep.id}`)}: ${r ? formatVerdictText(r, t) : '…'}`;
     });
     lines.push(`--- ${summary ?? ''} (MyWeather ${APP_VERSION}, ${new Date().toISOString()})`);
     await Clipboard.setStringAsync(lines.join('\n'));
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopied(false), 2000);
   };
 
   return (

@@ -2,14 +2,40 @@ import React, { useMemo } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import Svg, { Defs, RadialGradient, Stop, Rect } from 'react-native-svg';
 import { getWeatherTheme } from './DraggableCityCard';
 import PressableScale from './components/PressableScale';
+
+import { convertTemp } from './utils/weatherFormat';
+
+function displayCardTemp(item, tempUnit) {
+  if (typeof item?.tempC === 'number' && Number.isFinite(item.tempC)) {
+    const v = convertTemp(item.tempC, tempUnit);
+    return v === null ? '–' : String(Math.round(v));
+  }
+  const parsed = item?.temp !== undefined && item?.temp !== '' ? Number(item.temp) : NaN;
+  if (Number.isFinite(parsed)) {
+    const v = convertTemp(parsed, tempUnit);
+    return v === null ? '–' : String(Math.round(v));
+  }
+  return item?.temp || '–';
+}
+
+function displayCardMinMax(item, tempUnit) {
+  if (
+    typeof item?.maxC === 'number' && Number.isFinite(item.maxC) &&
+    typeof item?.minC === 'number' && Number.isFinite(item.minC)
+  ) {
+    const hi = Math.round(convertTemp(item.maxC, tempUnit));
+    const lo = Math.round(convertTemp(item.minC, tempUnit));
+    return `${hi}° / ${lo}°`;
+  }
+  return item?.minMax || '';
+}
 
 // Top card for the device's geolocation. Rendered ONLY when coordinates were
 // successfully resolved (location !== null). Deliberately NOT a DraggableCityCard:
 // no drag handle, no checkbox, no delete — it is not part of the saved list.
-export default function CurrentLocationCard({ item, theme, fs, t, onPress, style }) {
+const CurrentLocationCard = React.memo(function CurrentLocationCard({ item, theme, fs, t, tempUnit = 'C', onPress, style }) {
   const safeItem = { ...item, isNight: item?.isNight ?? false };
   const weatherTheme = getWeatherTheme(safeItem.weathercode, safeItem.isNight);
   const subText = 'rgba(255, 255, 255, 0.85)';
@@ -123,24 +149,13 @@ export default function CurrentLocationCard({ item, theme, fs, t, onPress, style
             end={{ x: 1, y: 1 }}
             style={StyleSheet.absoluteFill}
           />
-          <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
-            <Defs>
-              <RadialGradient
-                id="current-location-glow"
-                cx="82%"
-                cy="35%"
-                rx="55%"
-                ry="65%"
-                fx="82%"
-                fy="35%"
-              >
-                <Stop offset="0%" stopColor="#ffffff" stopOpacity={0.16} />
-                <Stop offset="55%" stopColor="#ffffff" stopOpacity={0.05} />
-                <Stop offset="100%" stopColor="#ffffff" stopOpacity={0} />
-              </RadialGradient>
-            </Defs>
-            <Rect x="0" y="0" width="100%" height="100%" fill="url(#current-location-glow)" />
-          </Svg>
+          <LinearGradient
+            colors={['rgba(255,255,255,0.14)', 'rgba(255,255,255,0.03)', 'rgba(255,255,255,0)']}
+            start={{ x: 0.9, y: 0.1 }}
+            end={{ x: 0.2, y: 0.9 }}
+            style={StyleSheet.absoluteFill}
+            pointerEvents="none"
+          />
           <View style={styles.cardBody}>
             <View style={styles.pinWrap}>
               <Ionicons name="location-sharp" size={22} color="#FFFFFF" />
@@ -168,13 +183,15 @@ export default function CurrentLocationCard({ item, theme, fs, t, onPress, style
             </View>
             <View style={styles.cardRight}>
               <View style={styles.tempRow}>
-                <Text style={styles.cityTemp}>{safeItem.temp || '0'}</Text>
+                <Text style={styles.cityTemp}>{displayCardTemp(safeItem, tempUnit)}</Text>
                 <Text style={styles.tempDegree}>°</Text>
               </View>
-              <Text style={styles.cityMinMax}>{safeItem.minMax || ''}</Text>
+              <Text style={styles.cityMinMax}>{displayCardMinMax(safeItem, tempUnit)}</Text>
             </View>
           </View>
         </View>
     </PressableScale>
   );
-}
+});
+
+export default CurrentLocationCard;

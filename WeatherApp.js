@@ -5,7 +5,6 @@ import {
   View,
   Text,
   StyleSheet,
-  TouchableOpacity,
   Pressable,
   Platform,
   ToastAndroid,
@@ -13,35 +12,25 @@ import {
   ActivityIndicator,
   ScrollView,
   RefreshControl,
-   Alert,
-   Animated,
-   Easing,
-   Switch,
-   Dimensions,
-   Linking,
-   Image,
-   StatusBar,
-   Modal,
-   TouchableWithoutFeedback,
-   Keyboard,
-   SafeAreaView,
-  } from 'react-native';
+  Alert,
+  Animated,
+  Easing,
+  Linking,
+  Modal,
+  TouchableWithoutFeedback,
+  Keyboard,
+} from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
- import ScreenWrapper from './ScreenWrapper';
+import { LinearGradient } from 'expo-linear-gradient';
+import ScreenWrapper from './ScreenWrapper';
 import PressableScale from './components/PressableScale';
 import FadeSlideIn from './components/FadeSlideIn';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Circle, Defs, G, Line, Path, RadialGradient, Rect, Stop } from 'react-native-svg';
-import { LinearGradient } from 'expo-linear-gradient';
-import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
-import {
-  THEME_MODES,
-} from './themes';
 import { useRoute, useNavigation, useFocusEffect } from '@react-navigation/native';
 import { useTranslation } from 'react-i18next';
-import i18n, { changeLanguage } from './i18n';
+import i18n from './i18n';
 import { LoadingContext } from './LoadingContext';
 import { SettingsContext } from './SettingsContext';
 import { useFontSize } from './FontSizeContext';
@@ -49,20 +38,39 @@ import { useTheme } from './ThemeContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { isOfflineError, isRegionLike, resolvePlaceName } from './geocoding';
 import { fetchForecast, searchCity } from './utils/weatherProviders';
+import { fetchJsonWithRetry, HttpError, isExternalAbortError } from './utils/http';
+import { acquireCurrentPosition } from './utils/locationHelper';
+import { preloadCityListCache } from './CityListScreen';
+import { WeatherIcon, SunAnimation, FogAnimation } from './components/weather/WeatherIcons';
+import {
+  weathercodeToType,
+  isNightHour,
+  isCoordsLikeText,
+  formatLocationSubtitle,
+  getHourlyTimeline,
+  beaufortFromMs,
+  convertWind,
+  formatTemp,
+  windDirectionKey,
+  hpaToMmHg,
+  computeWeeklyTempBounds,
+  computeDayRangeFractions,
+  computeTempRangeColors,
+  computeCurrentTempPct,
+  extractCurrentExtras,
+  computeCityClock,
+} from './utils/weatherFormat';
 
 const BASE_URL = 'https://api.open-meteo.com/v1/forecast';
 const TIMEOUT_MS = 10000;
-const SCREEN_WIDTH = Dimensions.get('window').width;
-const APP_VERSION = require('./package.json').version;
-const APP_ICON_SOURCE = require('./assets/icon.png');
-const GITHUB_URL = 'https://github.com/werxuiiika/My-Weather-app';
+const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim: 'Nominatim' };
 
 const REMEMBER_CITY_ENABLED_KEY = 'remember_city_enabled';
 const LAST_CITY_KEY = 'last_selected_city';
+const LAST_WEATHER_KEY = 'last_weather_data';
 
 const loadLastCity = async () => { try { return await AsyncStorage.getItem(LAST_CITY_KEY); } catch (e) { return null; } };
 // Cache-First: last successfully loaded weather snapshot for instant display.
-const LAST_WEATHER_KEY = 'last_weather_data';
 const loadCachedWeather = async () => {
   try {
     const raw = await AsyncStorage.getItem(LAST_WEATHER_KEY);
@@ -76,954 +84,52 @@ const saveCachedWeather = async (snapshot) => {
   try { await AsyncStorage.setItem(LAST_WEATHER_KEY, JSON.stringify(snapshot)); } catch (e) {}
 };
 const saveLastCity = async (name) => { try { await AsyncStorage.setItem(LAST_CITY_KEY, name); } catch (e) {} };
-const clearLastCity = async () => { try { await AsyncStorage.removeItem(LAST_CITY_KEY); } catch (e) {} };
 const loadRememberCity = async () => { try { const v = await AsyncStorage.getItem(REMEMBER_CITY_ENABLED_KEY); return v === null ? true : v === 'true'; } catch (e) { return true; } };
-const saveRememberCity = async (value) => {
-  try {
-    await AsyncStorage.setItem(REMEMBER_CITY_ENABLED_KEY, value ? 'true' : 'false');
-    if (!value) {
-      await clearLastCity();
-    }
-  } catch (e) {}
-};
 
-const fetchJson = async (url) => {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+const makeFetchJson = (signal, timeoutMs = TIMEOUT_MS) => async (url) => {
   try {
-    const res = await fetch(url, { signal: controller.signal });
-    return await res.json();
+    return await fetchJsonWithRetry(url, { timeoutMs, signal });
   } catch (e) {
-    if (e instanceof TypeError || (e && e.name === 'AbortError')) {
-      const err = new Error(e instanceof TypeError ? i18n.t('noInternet') : i18n.t('serverTimeout'));
+    if (isExternalAbortError(e)) throw e;
+    if (e?.isTimeout || (e && e.name === 'AbortError')) {
+      const err = new Error(i18n.t('serverTimeout'));
+      err.kind = 'timeout';
+      throw err;
+    }
+    if (e instanceof TypeError) {
+      const err = new Error(i18n.t('noInternet'));
       err.kind = 'network';
       throw err;
     }
+    if (e instanceof HttpError) {
+      const err = new Error(i18n.t('weatherFetchFailed'));
+      err.kind = 'http';
+      err.status = e.status;
+      throw err;
+    }
     throw e;
-  } finally {
-    clearTimeout(timer);
   }
 };
 
-const ICON_COLORS = {
-  sun: '#ffd166',
-  moon: '#eaf0fc',
-  cloudLight: '#c3cee6',
-  cloudDark: '#9fb0d6',
-  drop: '#5b9bd5',
-  snow: '#f2f7ff',
-  fog: '#aab6cf',
-};
-
-const THUNDER_BOLT_PATHS = [
-  'M32 14 L26 54 L32 54 L28 64 L40 46 L36 46',
-  'M34 14 L40 50 L34 50 L38 62 L30 44 L33 44',
-  'M30 46 L26 60 L34 60 L30 46',
-];
-
-function CloudShape({ x = 0, y = 0, s = 1, fill }) {
-  return (
-    <G transform={`translate(${x} ${y}) scale(${s})`}>
-      <Circle cx={21} cy={33} r={9} fill={fill} />
-      <Circle cx={32} cy={27} r={11.5} fill={fill} />
-      <Circle cx={43} cy={34} r={8} fill={fill} />
-      <Rect x={12} y={37} width={40} height={9} rx={4.5} fill={fill} />
-    </G>
-  );
-}
-
-function SunCore({ x = 0, y = 0, s = 1 }) {
-  const rays = [];
-  for (let i = 0; i < 8; i++) {
-    const a = (i * Math.PI) / 4;
-    rays.push(
-      <Line key={i}
-        x1={x + Math.cos(a) * 13 * s} y1={y + Math.sin(a) * 13 * s}
-        x2={x + Math.cos(a) * 18 * s} y2={y + Math.sin(a) * 18 * s}
-        stroke={ICON_COLORS.sun} strokeWidth={3 * s} strokeLinecap="round" />
-    );
-  }
-  return (
-    <G>
-      {rays}
-      <Circle cx={x} cy={y} r={9 * s} fill={ICON_COLORS.sun} />
-    </G>
-  );
-}
-
-function MoonCrescent({ transform }) {
-  const { theme } = useTheme();
-  const fill = theme.mode === 'light' ? '#6b7c9e' : '#eaf0fc';
-  return (
-    <Path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
-      fill={fill} transform={transform} />
-  );
-}
-
-function GithubIcon({ size = 22, color = '#eaf0fc' }) {
-  return (
-    <Svg width={size} height={size} viewBox="0 0 16 16">
-      <Path fillRule="evenodd" clipRule="evenodd"
-        d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
-        fill={color} />
-    </Svg>
-  );
-}
-
-function RainLayer({ size, heavy }) {
-  const scale = size / 64;
-  const dropsRef = useRef(null);
-  if (dropsRef.current === null) {
-    const count = heavy ? 7 : 5;
-    dropsRef.current = Array.from({ length: count }, (_, i) => ({
-      v: new Animated.Value(0),
-      left: 19 + ((i * 47) % 27),
-      cycle: 900 + ((i * 137) % 420),
-      len: heavy && i % 2 === 0 ? 11 : 8,
-    }));
-  }
-  const drops = dropsRef.current;
-  useEffect(() => {
-    const loops = drops.map((d) =>
-      Animated.loop(
-        Animated.timing(d.v, {
-          toValue: 1,
-          duration: d.cycle,
-          easing: Easing.linear,
-          useNativeDriver: true,
-        })
-      )
-    );
-    loops.forEach((l) => l.start());
-    return () => loops.forEach((l) => l.stop());
-  }, [drops]);
-  return (
-    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-      {drops.map((d, i) => (
-        <Animated.View
-          key={i}
-          pointerEvents="none"
-          style={{
-            position: 'absolute',
-            left: d.left * scale,
-            top: 44 * scale,
-            width: Math.max(2, 3 * scale),
-            height: d.len * scale,
-            borderRadius: Math.max(1, 1.5 * scale),
-            backgroundColor: ICON_COLORS.drop,
-            opacity: 0.85,
-            transform: [
-              {
-                translateY: d.v.interpolate({
-                  inputRange: [0, 0.18, 0.8, 1],
-                  outputRange: [-6 * scale, -6 * scale, 24 * scale, 24 * scale],
-                }),
-              },
-            ],
-          }}
-        />
-      ))}
-    </View>
-  );
-}
-
-function SnowLayer({ size }) {
-  const { theme } = useTheme();
-  const scale = size / 64;
-  const fill = theme.mode === 'light' ? '#8fa4c9' : ICON_COLORS.snow;
-  const flakesRef = useRef(null);
-  if (flakesRef.current === null) {
-    flakesRef.current = Array.from({ length: 10 }, (_, i) => ({
-      v: new Animated.Value(0),
-      left: 15 + ((i * 29) % 33),
-      dia: 3 + ((i * 7) % 7) * 0.5,
-      cycle: 1600 + ((i * 173) % 1300),
-      amp: 1.5 + (i % 3),
-    }));
-  }
-  const flakes = flakesRef.current;
-  useEffect(() => {
-    const loops = flakes.map((f) =>
-      Animated.loop(
-        Animated.timing(f.v, {
-          toValue: 1,
-          duration: f.cycle,
-          easing: Easing.linear,
-          useNativeDriver: true,
-        })
-      )
-    );
-    loops.forEach((l) => l.start());
-    return () => loops.forEach((l) => l.stop());
-  }, [flakes]);
-  return (
-    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-      {flakes.map((f, i) => (
-        <Animated.View
-          key={i}
-          pointerEvents="none"
-          style={{
-            position: 'absolute',
-            left: f.left * scale,
-            top: 42 * scale,
-            width: Math.max(2, f.dia * scale),
-            height: Math.max(2, f.dia * scale),
-            borderRadius: Math.max(1, (f.dia * scale) / 2),
-            backgroundColor: fill,
-            opacity: 0.9,
-            transform: [
-              {
-                translateX: f.v.interpolate({
-                  inputRange: [0, 0.25, 0.5, 0.75, 1],
-                  outputRange: [0, f.amp * scale, 0, -f.amp * scale, 0],
-                }),
-              },
-              {
-                translateY: f.v.interpolate({
-                  inputRange: [0, 0.12, 0.82, 1],
-                  outputRange: [-8 * scale, -8 * scale, 24 * scale, 24 * scale],
-                }),
-              },
-            ],
-          }}
-        />
-      ))}
-    </View>
-  );
-}
-
-function DriftCloud({ size, fill, offsetX = 0, offsetY = 0, s = 1 }) {
-  const scale = size / 64;
-  const u = (v) => v * scale * s;
-  const x = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(x, {
-          toValue: 1,
-          duration: 3500,
-          easing: Easing.linear,
-          useNativeDriver: true,
-        }),
-        Animated.timing(x, {
-          toValue: 0,
-          duration: 3500,
-          easing: Easing.linear,
-          useNativeDriver: true,
-        }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, []);
-  const translateX = x.interpolate({
-    inputRange: [0, 1],
-    outputRange: [-3 * scale, 3 * scale],
-  });
-  return (
-    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-      <Animated.View
-        style={{
-          position: 'absolute',
-          left: offsetX * scale,
-          top: offsetY * scale,
-          width: 64 * scale * s,
-          height: 64 * scale * s,
-          transform: [{ translateX }],
-        }}
-      >
-        <View style={{ position: 'absolute', left: u(12), top: u(24), width: u(18), height: u(18), borderRadius: u(9), backgroundColor: fill }} />
-        <View style={{ position: 'absolute', left: u(20.5), top: u(15.5), width: u(23), height: u(23), borderRadius: u(11.5), backgroundColor: fill }} />
-        <View style={{ position: 'absolute', left: u(35), top: u(26), width: u(16), height: u(16), borderRadius: u(8), backgroundColor: fill }} />
-        <View style={{ position: 'absolute', left: u(12), top: u(37), width: u(40), height: u(9), borderRadius: u(4.5), backgroundColor: fill }} />
-      </Animated.View>
-    </View>
-  );
-}
-
-function ThunderWeather({ size }) {
-  const scale = size / 64;
-  const originX = 32 * scale;
-  const originY = 34 * scale;
-  const burstR = 36 * scale;
-
-  const forkOps = useRef(null);
-  if (forkOps.current === null) {
-    forkOps.current = THUNDER_BOLT_PATHS.map(() => new Animated.Value(0));
-  }
-  const forkOpsValues = forkOps.current;
-  const burstScale = useRef(new Animated.Value(1)).current;
-  const burstOp = useRef(new Animated.Value(0)).current;
-  const flashOp = useRef(new Animated.Value(0)).current;
-  const shake = useRef(new Animated.Value(0)).current;
-  const animRef = useRef(null);
-  const [lit, setLit] = useState(false);
-
-  const runStrike = (forkIndex) => {
-    const op = forkOpsValues[forkIndex];
-    op.setValue(0);
-    setLit(true);
-    Animated.sequence([
-      Animated.timing(op, {
-        toValue: 0.85,
-        duration: 70,
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
-      }),
-      Animated.timing(op, {
-        toValue: 0,
-        duration: 240,
-        easing: Easing.in(Easing.quad),
-        useNativeDriver: true,
-      }),
-    ]).start(() => setLit(false));
-  };
-
-  const runBurst = () => {
-    const hitCount = 2 + Math.floor(Math.random() * 2);
-    let fired = 0;
-    const fireNext = () => {
-      runStrike(fired % THUNDER_BOLT_PATHS.length);
-      fired += 1;
-      if (fired < hitCount) {
-        animRef.current = setTimeout(fireNext, 120 + Math.random() * 80);
-      } else {
-        animRef.current = setTimeout(runStorm, 2200 + Math.random() * 3200);
-      }
-    };
-    burstScale.setValue(0.3);
-    burstOp.setValue(0);
-    flashOp.setValue(0);
-    shake.setValue(0);
-    Animated.parallel([
-      Animated.timing(burstScale, {
-        toValue: 1.6,
-        duration: 240,
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
-      }),
-      Animated.sequence([
-        Animated.timing(burstOp, { toValue: 0.9, duration: 90, useNativeDriver: true }),
-        Animated.timing(burstOp, {
-          toValue: 0,
-          duration: 220,
-          easing: Easing.in(Easing.quad),
-          useNativeDriver: true,
-        }),
-      ]),
-      Animated.sequence([
-        Animated.timing(flashOp, { toValue: 0.55, duration: 80, useNativeDriver: true }),
-        Animated.timing(flashOp, {
-          toValue: 0,
-          duration: 280,
-          easing: Easing.in(Easing.quad),
-          useNativeDriver: true,
-        }),
-      ]),
-      Animated.sequence([
-        Animated.timing(shake, { toValue: 1, duration: 150, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-        Animated.timing(shake, { toValue: 0, duration: 140, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-      ]),
-    ]).start();
-    fireNext();
-  };
-
-  const runStorm = () => {
-    runBurst();
-  };
-
-  useEffect(() => {
-    let cancelled = false;
-    const first = () => {
-      if (cancelled) return;
-      runStorm();
-    };
-    animRef.current = setTimeout(first, 800 + Math.random() * 1400);
-    return () => {
-      cancelled = true;
-      if (animRef.current) clearTimeout(animRef.current);
-      forkOpsValues.forEach((o) => o.stopAnimation());
-      [burstScale, burstOp, flashOp, shake].forEach((v) => v.stopAnimation());
-    };
-  }, []);
-
-  const shakeX = shake.interpolate({
-    inputRange: [0, 0.25, 0.5, 0.75, 1],
-    outputRange: [-3 * scale, -2 * scale, 3 * scale, 2 * scale, 0],
-  });
-  const shakeY = shake.interpolate({
-    inputRange: [0, 0.5, 1],
-    outputRange: [0, -2 * scale, 0],
-  });
-
-  return (
-    <View style={{ width: size, height: size, overflow: 'hidden' }}>
-      <Animated.View
-        style={{
-          width: size,
-          height: size,
-          transform: [{ translateX: shakeX }, { translateY: shakeY }],
-        }}
-      >
-        <Svg width={size} height={size} viewBox="0 0 64 64">
-          <G>
-            <CloudShape y={-2} fill={lit ? '#cbd6ec' : ICON_COLORS.cloudDark} />
-          </G>
-        </Svg>
-
-        {THUNDER_BOLT_PATHS.map((d, i) => (
-          <Animated.View
-            key={`bolt-${i}`}
-            pointerEvents="none"
-            style={[StyleSheet.absoluteFill, { width: size, height: size, opacity: forkOpsValues[i] }]}
-          >
-            <Svg width={size} height={size} viewBox="0 0 64 64">
-              <G>
-                <Path
-                  d={d}
-                  stroke={ICON_COLORS.sun}
-                  strokeWidth={2.2}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  fill="none"
-                />
-                <Path
-                  d={d}
-                  stroke="rgba(255, 255, 0, 0.35)"
-                  strokeWidth={4.4}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  fill="none"
-                />
-              </G>
-            </Svg>
-          </Animated.View>
-        ))}
-
-        <Animated.View
-          pointerEvents="none"
-          style={[StyleSheet.absoluteFill, { backgroundColor: '#fff9c4', opacity: flashOp }]}
-        />
-
-        <Animated.View
-          pointerEvents="none"
-          style={{
-            position: 'absolute',
-            left: originX - burstR,
-            top: originY - burstR,
-            width: burstR * 2,
-            height: burstR * 2,
-            opacity: burstOp,
-            transform: [{ scale: burstScale }],
-          }}
-        >
-          <Svg width={burstR * 2} height={burstR * 2} viewBox="0 0 64 64">
-            <Defs>
-              <RadialGradient id="thunderBurst" cx="32" cy="32" r="32" fx="32" fy="32">
-                <Stop offset="0%" stopColor="#ffffff" stopOpacity={1} />
-                <Stop offset="100%" stopColor="#ffffff" stopOpacity={0} />
-              </RadialGradient>
-            </Defs>
-            <Circle cx={32} cy={32} r={32} fill="url(#thunderBurst)" />
-          </Svg>
-        </Animated.View>
-      </Animated.View>
-    </View>
-  );
-}
-
-function ForecastFogAnimation({ size = 26 }) {
-  const anim1 = useRef(new Animated.Value(0)).current;
-  const anim2 = useRef(new Animated.Value(0)).current;
-  const anim3 = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    const createLoop = (anim, delay = 0) => {
-      return Animated.loop(
-        Animated.sequence([
-          Animated.delay(delay),
-          Animated.timing(anim, {
-            toValue: 1,
-            duration: 4000,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-          Animated.timing(anim, {
-            toValue: 0,
-            duration: 4000,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-        ])
-      );
-    };
-
-    const l1 = createLoop(anim1, 0);
-    const l2 = createLoop(anim2, 100);
-    const l3 = createLoop(anim3, 200);
-
-    l1.start();
-    l2.start();
-    l3.start();
-
-    return () => {
-      l1.stop();
-      l2.stop();
-      l3.stop();
-    };
-  }, [anim1, anim2, anim3]);
-
-  const translateX1 = anim1.interpolate({ inputRange: [0, 1], outputRange: [0, 5] });
-  const translateX2 = anim2.interpolate({ inputRange: [0, 1], outputRange: [0, 6] });
-  const translateX3 = anim3.interpolate({ inputRange: [0, 1], outputRange: [0, 5] });
-
-  return (
-    <View style={{ width: size, height: size * 0.833, alignItems: 'center', justifyContent: 'center' }}>
-      <Svg width={size} height={size * 0.833} viewBox="0 0 120 100">
-        <Path
-          d="M 45 78
-             L 95 78
-             A 16 16 0 0 0 111 62
-             A 15 15 0 0 0 99 48
-             A 22 22 0 0 0 58 35
-             A 25 25 0 0 0 35 55
-             A 16 16 0 0 0 45 78 Z"
-          fill="#CFD8DC"
-        />
-        <AnimatedLine
-          x1="35"
-          y1="58"
-          x2="75"
-          y2="58"
-          stroke="#B0BEC5"
-          strokeWidth="6"
-          strokeLinecap="round"
-          style={{ transform: [{ translateX: translateX1 }] }}
-        />
-        <AnimatedLine
-          x1="22"
-          y1="71"
-          x2="80"
-          y2="71"
-          stroke="#B0BEC5"
-          strokeWidth="6"
-          strokeLinecap="round"
-          style={{ transform: [{ translateX: translateX2 }] }}
-        />
-        <AnimatedLine
-          x1="25"
-          y1="84"
-          x2="95"
-          y2="84"
-          stroke="#B0BEC5"
-          strokeWidth="6"
-          strokeLinecap="round"
-          style={{ transform: [{ translateX: translateX3 }] }}
-        />
-      </Svg>
-    </View>
-  );
-}
-
-// Slow-spinning sun overlay for small forecast icons (hourly/weekly).
-// The hero uses the showcase SunAnimation; everything else renders through
-// WeatherIcon with a static SunCore — this makes those suns rotate too.
-// One native-driven loop per icon (same cost class as the existing
-// RainLayer/SnowLayer loops), slow 30s period so lists stay calm.
-function SpinningSun({ cx = 32, cy = 32, s = 1.25, duration = 30000 }) {
-  const rotate = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    const spin = Animated.loop(
-      Animated.timing(rotate, {
-        toValue: 1,
-        duration,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      })
-    );
-    spin.start();
-    return () => spin.stop();
-  }, [rotate, duration]);
-
-  const rotateDeg = rotate.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg'],
-  });
-
-  // SunCore spans r=18*s (+stroke) around (cx,cy) in 64-units; the overlay
-  // box is centered on the sun so rotation stays on axis.
-  const half = (19.5 * s) / 64;
-  const fx = cx / 64;
-  const fy = cy / 64;
-
-  return (
-    <Animated.View
-      pointerEvents="none"
-      style={{
-        position: 'absolute',
-        left: `${(fx - half) * 100}%`,
-        top: `${(fy - half) * 100}%`,
-        width: `${half * 2 * 100}%`,
-        height: `${half * 2 * 100}%`,
-        transform: [{ rotate: rotateDeg }],
-      }}
-    >
-      <Svg
-        width="100%"
-        height="100%"
-        viewBox={`${cx - 19.5 * s} ${cy - 19.5 * s} ${39 * s} ${39 * s}`}
-      >
-        <SunCore x={cx} y={cy} s={s} />
-      </Svg>
-    </Animated.View>
-  );
-}
-
-function WeatherIcon({ type = 'clear', isNight = false, size = 96 }) {
-  if (type === 'thunder') {
-    return <ThunderWeather size={size} />;
-  }
-  if (type === 'fog') {
-    return <ForecastFogAnimation size={size} />;
-  }
-  const isRain = type === 'rain' || type === 'showers';
-  const isSnow = type === 'snow';
-  let content = null;
-  let driftingCloud = null;
-  let spinningSun = null;
-  if (type === 'clear') {
-    if (isNight) {
-      content = <MoonCrescent transform="translate(8 8) scale(2)" />;
-    } else {
-      content = null;
-      spinningSun = { cx: 32, cy: 32, s: 1.25 };
-    }
-  } else if (type === 'partly') {
-    if (isNight) {
-      content = <MoonCrescent transform="translate(20 0) scale(1.5)" />;
-    } else {
-      content = null;
-      spinningSun = { cx: 22, cy: 20, s: 0.85 };
-    }
-    driftingCloud = { fill: ICON_COLORS.cloudDark, offsetX: 4, offsetY: 8, s: 0.85 };
-  } else if (type === 'fog') {
-    content = (
-      <G>
-        <Line x1={14} y1={53} x2={50} y2={53} stroke={ICON_COLORS.fog} strokeWidth={3.5} strokeLinecap="round" />
-        <Line x1={20} y1={59} x2={44} y2={59} stroke={ICON_COLORS.fog} strokeWidth={3.5} strokeLinecap="round" />
-      </G>
-    );
-    driftingCloud = { fill: ICON_COLORS.cloudDark, offsetY: -6 };
-  } else if (type === 'snow') {
-    content = <CloudShape y={-2} fill={ICON_COLORS.cloudDark} />;
-  } else if (type === 'fog') {
-    content = null;
-  } else {
-    content = (
-      <CloudShape y={-2} fill={type === 'showers' ? ICON_COLORS.cloudDark : ICON_COLORS.cloudLight} />
-    );
-  }
-  return (
-    <View style={{ width: size, height: size, overflow: 'hidden' }}>
-      {isRain && <RainLayer size={size} heavy={type === 'showers'} />}
-      {isSnow && <SnowLayer size={size} />}
-      <Svg width={size} height={size} viewBox="0 0 64 64">
-        {content}
-      </Svg>
-      {spinningSun && <SpinningSun {...spinningSun} />}
-      {driftingCloud && <DriftCloud size={size} {...driftingCloud} />}
-    </View>
-  );
-}
-
-function SunAnimation({ size = 96 }) {
-  const rotate = useRef(new Animated.Value(0)).current;
-  const scale = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    const spin = Animated.loop(
-      Animated.timing(rotate, {
-        toValue: 1,
-        duration: 20000,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      })
-    );
-    const pulse = Animated.loop(
-      Animated.sequence([
-        Animated.timing(scale, { toValue: 1.05, duration: 1500, useNativeDriver: true }),
-        Animated.timing(scale, { toValue: 1, duration: 1500, useNativeDriver: true }),
-      ])
-    );
-    spin.start();
-    pulse.start();
-    return () => {
-      spin.stop();
-      pulse.stop();
-    };
-  }, [rotate, scale]);
-
-  const rotateDeg = rotate.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg'],
-  });
-
-  return (
-    <Animated.View
-      style={{ width: size, height: size, transform: [{ rotate: rotateDeg }, { scale }] }}
-    >
-      <Svg width={size} height={size} viewBox="0 0 64 64">
-        <SunCore x={32} y={32} s={1.25} />
-      </Svg>
-    </Animated.View>
-  );
-}
-
-function FogAnimation({ size = 140 }) {
-  const anim1 = useRef(new Animated.Value(0)).current;
-  const anim2 = useRef(new Animated.Value(0)).current;
-  const anim3 = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    const createLoop = (anim, delay = 0) => {
-      return Animated.loop(
-        Animated.sequence([
-          Animated.delay(delay),
-          Animated.timing(anim, {
-            toValue: 1,
-            duration: 4000,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-          Animated.timing(anim, {
-            toValue: 0,
-            duration: 4000,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-        ])
-      );
-    };
-
-    const l1 = createLoop(anim1, 0);
-    const l2 = createLoop(anim2, 100);
-    const l3 = createLoop(anim3, 200);
-
-    l1.start();
-    l2.start();
-    l3.start();
-
-    return () => {
-      l1.stop();
-      l2.stop();
-      l3.stop();
-    };
-  }, [anim1, anim2, anim3]);
-
-  const translateX1 = anim1.interpolate({ inputRange: [0, 1], outputRange: [0, 22] });
-  const translateX2 = anim2.interpolate({ inputRange: [0, 1], outputRange: [0, 26] });
-  const translateX3 = anim3.interpolate({ inputRange: [0, 1], outputRange: [0, 20] });
-
-  return (
-    <View style={{ width: size, height: size * 0.833, alignItems: 'center', justifyContent: 'center', marginLeft: -24 }}>
-      <Svg width={size} height={size * 0.833} viewBox="0 0 120 100">
-        <Defs />
-        {/* Cloud Body */}
-        <Path
-          d="M 45 78
-             L 95 78
-             A 16 16 0 0 0 111 62
-             A 15 15 0 0 0 99 48
-             A 22 22 0 0 0 58 35
-             A 25 25 0 0 0 35 55
-             A 16 16 0 0 0 45 78 Z"
-          fill="#CFD8DC"
-        />
-
-        {/* Wind Line 1 */}
-        <AnimatedLine
-          x1="35"
-          y1="58"
-          x2="75"
-          y2="58"
-          stroke="#B0BEC5"
-          strokeWidth="6"
-          strokeLinecap="round"
-          style={{ transform: [{ translateX: translateX1 }] }}
-        />
-
-        {/* Wind Line 2 */}
-        <AnimatedLine
-          x1="22"
-          y1="71"
-          x2="80"
-          y2="71"
-          stroke="#B0BEC5"
-          strokeWidth="6"
-          strokeLinecap="round"
-          style={{ transform: [{ translateX: translateX2 }] }}
-        />
-
-        {/* Wind Line 3 */}
-        <AnimatedLine
-          x1="25"
-          y1="84"
-          x2="95"
-          y2="84"
-          stroke="#B0BEC5"
-          strokeWidth="6"
-          strokeLinecap="round"
-          style={{ transform: [{ translateX: translateX3 }] }}
-        />
-      </Svg>
-    </View>
-  );
-}
-
-const AnimatedLine = Animated.createAnimatedComponent(Line);
-
-function weathercodeToType(code) {
-  if (code === 0) return 'clear';
-  if (code <= 3) return 'partly';
-  if (code <= 48) return 'fog';
-  if (code <= 67) return 'rain';
-  if (code <= 77) return 'snow';
-  if (code <= 86) return 'showers';
-  return 'thunder';
-}
-
-function isNightHour(isoTime) {
-  const h = parseInt(String(isoTime || '').slice(11, 13), 10);
-  if (Number.isNaN(h)) return false;
-  return h >= 21 || h < 6;
-}
-
-// True when a "country" string is actually just coordinates
-// (e.g. old cached snapshots stored "55.75,37.62" as country).
-// Such values must not be rendered next to the real coordinates.
-function isCoordsLikeText(s) {
-  return /^\s*-?\d+(\.\d+)?\s*,\s*-?\d+(\.\d+)?\s*$/.test(String(s || ''));
-}
-
-// Next N timeline entries (hourly forecast + sunrise/sunset events) starting from current hour.
-function getHourlyTimeline(data, count = 24) {
-  if (!data) return [];
-  if (!data.hourly || !data.hourly.time) {
-    const now = new Date();
-    const times = [];
-    const temps = [];
-    const codes = [];
-    const baseTemp = data.current_weather?.temperature ?? 20;
-    const baseCode = data.current_weather?.weathercode ?? 0;
-    for (let i = 0; i < count; i++) {
-      const d = new Date(now.getTime() + i * 3600000);
-      const pad = (n) => String(n).padStart(2, '0');
-      times.push(`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`);
-      temps.push(baseTemp);
-      codes.push(baseCode);
-    }
-    data = {
-      ...data,
-      hourly: { time: times, temperature_2m: temps, weathercode: codes }
-    };
-  }
-  const offset = typeof data.utc_offset_seconds === 'number' ? data.utc_offset_seconds : 0;
-  const now = new Date(Date.now() + new Date().getTimezoneOffset() * 60000 + offset * 1000);
-  const pad = (n) => String(n).padStart(2, '0');
-  const nowHour = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}`;
-  
-  let startIdx = data.hourly.time.findIndex((t) => String(t).slice(0, 13) >= nowHour);
-  if (startIdx === -1) startIdx = 0;
-  
-  const endIndex = Math.min(data.hourly.time.length, startIdx + count);
-  const startTime = data.hourly.time[startIdx];
-  const endTime = data.hourly.time[endIndex - 1] || '9999-12-31T23:59';
-
-  const items = [];
-  for (let k = startIdx; k < endIndex; k++) {
-    items.push({
-      type: 'hour',
-      time: data.hourly.time[k],
-      temp: data.hourly.temperature_2m?.[k],
-      code: data.hourly.weathercode?.[k],
-    });
-  }
-
-  if (data.daily && data.daily.sunrise && data.daily.sunset) {
-    for (let i = 0; i < data.daily.sunrise.length; i++) {
-      const sr = data.daily.sunrise[i];
-      if (sr && sr >= startTime && sr <= endTime) {
-        items.push({ type: 'sunrise', time: sr });
-      }
-      const ss = data.daily.sunset[i];
-      if (ss && ss >= startTime && ss <= endTime) {
-        items.push({ type: 'sunset', time: ss });
-      }
-    }
-  }
-
-  items.sort((a, b) => String(a.time).localeCompare(String(b.time)));
-  return items.slice(0, count);
-}
-
-const TEMP_UNIT_OPTIONS = [
-  { value: 'C', labelKey: 'tempUnits.C.label', descKey: 'tempUnits.C.desc' },
-  { value: 'F', labelKey: 'tempUnits.F.label', descKey: 'tempUnits.F.desc' },
-];
-
-const WIND_UNIT_OPTIONS = [
-  { value: 'kmh', labelKey: 'windUnits.kmh.label', descKey: 'windUnits.kmh.desc' },
-  { value: 'ms', labelKey: 'windUnits.ms.label', descKey: 'windUnits.ms.desc' },
-  { value: 'mph', labelKey: 'windUnits.mph.label', descKey: 'windUnits.mph.desc' },
-  { value: 'knots', labelKey: 'windUnits.knots.label', descKey: 'windUnits.knots.desc' },
-  { value: 'beaufort', labelKey: 'windUnits.beaufort.label', descKey: 'windUnits.beaufort.desc' },
-];
-
-const LANGUAGE_OPTIONS = [
-  { value: 'ru', labelKey: 'russian' },
-  { value: 'en', labelKey: 'english' },
-];
-
-function beaufortFromMs(ms) {
-  const v = Math.abs(ms);
-  if (v <= 0.2) return 0;
-  if (v <= 1.5) return 1;
-  if (v <= 3.3) return 2;
-  if (v <= 5.4) return 3;
-  if (v <= 7.9) return 4;
-  if (v <= 10.7) return 5;
-  if (v <= 13.8) return 6;
-  if (v <= 17.1) return 7;
-  if (v <= 20.7) return 8;
-  if (v <= 24.4) return 9;
-  if (v <= 28.4) return 10;
-  if (v <= 32.6) return 11;
-  return 12;
-}
-
-function convertTemp(celsius, unit) {
-  if (unit === 'F') return celsius * 9 / 5 + 32;
-  return celsius;
-}
-
-function convertWind(speedKmh, unit) {
-  if (unit === 'ms') return speedKmh / 3.6;
-  if (unit === 'mph') return speedKmh / 1.609344;
-  if (unit === 'knots') return speedKmh / 1.852;
-  if (unit === 'beaufort') return beaufortFromMs(speedKmh / 3.6);
-  return speedKmh;
-}
-
-function formatTemp(celsius, unit) {
-  return `${Math.round(convertTemp(celsius, unit))}°`;
-}
-
-function formatWind(speedKmh, unit) {
-  if (unit === 'beaufort') return `${beaufortFromMs(speedKmh / 3.6)} ${i18n.t('windLabels.beaufort')}`;
+function formatWind(speedKmh, unit, directionDeg = null) {
   const v = convertWind(speedKmh, unit);
-  if (unit === 'kmh') return `${Math.round(v)} ${i18n.t('windLabels.kmh')}`;
-  return `${v.toFixed(1)} ${i18n.t(`windLabels.${unit}`) || i18n.t('windLabels.kmh')}`;
+  if (v === null) return '–';
+  let text;
+  if (unit === 'beaufort') {
+    text = `${beaufortFromMs(speedKmh / 3.6)} ${i18n.t('windLabels.beaufort')}`;
+  } else if (unit === 'kmh') {
+    text = `${Math.round(v)} ${i18n.t('windLabels.kmh')}`;
+  } else {
+    text = `${v.toFixed(1)} ${i18n.t(`windLabels.${unit}`) || i18n.t('windLabels.kmh')}`;
+  }
+  const dirKey = windDirectionKey(directionDeg);
+  if (dirKey) {
+    const dirLabel = i18n.t(`windDir.${dirKey}`);
+    if (dirLabel && dirLabel !== `windDir.${dirKey}`) {
+      return `${text} · ${dirLabel}`;
+    }
+  }
+  return text;
 }
 
 // Fade+rise the hero block when the displayed city changes (or on first
@@ -1117,12 +223,9 @@ function CrossfadeValue({ style, value }) {
 
 export default function App() {
   const { t: tr } = useTranslation();
-  const { theme, setThemeMode, themeMode, loaded: themeLoaded } = useTheme();
+  const { theme, loaded: themeLoaded } = useTheme();
   const insets = useSafeAreaInsets();
   const [isConnected, setIsConnected] = useState(null);
-  const updateConnection = (value) => {
-    setIsConnected(value);
-  };
   const [city, setCity] = useState('');
   const [loading, setLoading] = useState(false);
   const [locating, setLocating] = useState(false);
@@ -1140,12 +243,38 @@ export default function App() {
   const [isSplashVisible, setIsSplashVisible] = useState(true);
   const [isContentVisible, setIsContentVisible] = useState(false);
   const [splashRendered, setSplashRendered] = useState(true);
-   const [menuVisible, setMenuVisible] = useState(false);
-   const [settingsOpen, setSettingsOpen] = useState(false);
-   const [permissionModalVisible, setPermissionModalVisible] = useState(false);
+  const [menuVisible, setMenuVisible] = useState(false);
+  const [permissionModalVisible, setPermissionModalVisible] = useState(false);
   const menuAnim = useRef(new Animated.Value(0)).current;
 
-  const toggleMenu = () => {
+  // Monotonic request guard + active AbortController so rapid city switches
+  // or background refreshes never overwrite newer user selections.
+  const requestSeqRef = useRef(0);
+  const abortControllerRef = useRef(null);
+  const beginRequest = useCallback(() => {
+    const seq = ++requestSeqRef.current;
+    if (abortControllerRef.current) {
+      try { abortControllerRef.current.abort(); } catch (e) {}
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    return { seq, signal: controller.signal };
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      preloadCityListCache();
+    }, 1200);
+    return () => {
+      clearTimeout(t);
+      requestSeqRef.current += 1;
+      if (abortControllerRef.current) {
+        try { abortControllerRef.current.abort(); } catch (e) {}
+      }
+    };
+  }, []);
+
+  const toggleMenu = useCallback(() => {
     if (menuVisible) {
       Animated.timing(menuAnim, {
         toValue: 0,
@@ -1160,31 +289,36 @@ export default function App() {
         useNativeDriver: true,
       }).start();
     }
-  };
+  }, [menuVisible, menuAnim]);
 
-  const closeMenu = () => {
+  const closeMenu = useCallback(() => {
     Animated.timing(menuAnim, {
       toValue: 0,
       duration: 200,
       useNativeDriver: true,
     }).start(() => setMenuVisible(false));
-  };
+  }, [menuAnim]);
 
-  const menuScale = menuAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.9, 1],
-  });
+  const dismissMenuAndNavigate = useCallback((action) => {
+    menuAnim.stopAnimation();
+    menuAnim.setValue(0);
+    setMenuVisible(false);
+    // Let Android tear down the native Modal window cleanly on this frame
+    // before NativeStack starts slide_from_right, eliminating mid-slide jank.
+    requestAnimationFrame(() => {
+      action();
+    });
+  }, [menuAnim]);
 
-  const menuOpacity = menuAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, 1],
-  });
-  const [rememberCity, setRememberCity] = useState(true);
-  const [themePickerVisible, setThemePickerVisible] = useState(false);
-  const [unitPickerVisible, setUnitPickerVisible] = useState(false);
-  const [unitPickerMode, setUnitPickerMode] = useState('temp');
-  const [languagePickerVisible, setLanguagePickerVisible] = useState(false);
-  const [tempPickerAnim] = useState(() => new Animated.Value(0));
+  const menuScale = useMemo(
+    () => menuAnim.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] }),
+    [menuAnim],
+  );
+  const menuOpacity = useMemo(
+    () => menuAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 1] }),
+    [menuAnim],
+  );
+
   const lastRequest = useRef(null);
   const weatherRef = useRef(null);
   const rememberRef = useRef(true);
@@ -1192,10 +326,6 @@ export default function App() {
   const contentOpacity = useRef(new Animated.Value(0)).current;
   const sunScale = useRef(new Animated.Value(1)).current;
   const sunRotate = useRef(new Animated.Value(0)).current;
-  const settingsOverlayOpacity = useRef(new Animated.Value(0)).current;
-  const settingsScreenX = useRef(new Animated.Value(SCREEN_WIDTH)).current;
-  const pickerAnim = useRef(new Animated.Value(0)).current;
-  const languagePickerAnim = useRef(new Animated.Value(0)).current;
   const placeholderAnim = useRef(new Animated.Value(city.length === 0 ? 1 : 0)).current;
   const clearButtonAnim = useRef(new Animated.Value(city.length > 0 ? 1 : 0)).current;
 
@@ -1215,63 +345,81 @@ export default function App() {
         useNativeDriver: true,
       }),
     ]).start();
-  }, [city]);
+  }, [city, placeholderAnim, clearButtonAnim]);
+
   const fs = useFontSize();
-  const styles = useMemo(() => buildStyles(theme, fs || { spacing: 16, base: 16, small: 12, large: 20, iconSize: 24, cardHeight: 80 }, insets), [theme, fs, insets]);
-  const currentThemeLabel = useMemo(() => {
-    const found = THEME_MODES.find((m) => m.value === themeMode);
-    return found ? tr(found.labelKey) : tr('themeModes.author.label');
-  }, [themeMode, tr]);
+  const styles = useMemo(
+    () => buildStyles(theme, fs || { spacing: 16, base: 16, small: 12, large: 20, iconSize: 24, cardHeight: 80 }, insets),
+    [theme, fs, insets],
+  );
   const route = useRoute();
   const navigation = useNavigation();
   const cityParam = route.params?.city ?? route.params?.selectedCity;
+  const latParam = route.params?.latitude;
+  const lonParam = route.params?.longitude;
+  const countryParam = route.params?.country;
+  const navTsParam = route.params?.ts;
   const appliedCityParam = useRef(null);
-  const { isLoading, setLoading: setAppLoading } = useContext(LoadingContext);
-  const { tempUnit, windUnit, setTempUnit, setWindUnit, showSourceBadge } = useContext(SettingsContext);
+  const { setLoading: setAppLoading } = useContext(LoadingContext);
+  const { tempUnit, windUnit, showSourceBadge, locationSubtitleMode } = useContext(SettingsContext);
 
-// Display names for the live data source badge (keys = `source` field).
-const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim: 'Nominatim' };
-  const refreshColors =
-    theme.mode === 'light' ? ['#3573c2', '#25945a'] : ['#4a90d9', '#38b06b'];
-  const switchTrackOff = theme.mode === 'light' ? '#c9d3e6' : '#3a4560';
+  const refreshColors = useMemo(
+    () => (theme.mode === 'light' ? ['#3573c2', '#25945a'] : ['#4a90d9', '#38b06b']),
+    [theme.mode],
+  );
+
+  // Dismiss splash screen once timer elapses.
   useEffect(() => {
+    const timer = setTimeout(() => {
+      setIsSplashVisible(false);
+      setIsContentVisible(true);
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Only drive the loading/splash sun animation while it is actually on screen.
+  const sunAnimActive = splashRendered || ((loading || locating) && !weather);
+  useEffect(() => {
+    if (!sunAnimActive) return;
     const spin = Animated.loop(
-      Animated.timing(sunRotate, { toValue: 1, duration: 6000, useNativeDriver: true })
+      Animated.timing(sunRotate, { toValue: 1, duration: 6000, easing: Easing.linear, useNativeDriver: true }),
     );
     const pulse = Animated.loop(
       Animated.sequence([
         Animated.timing(sunScale, { toValue: 1.15, duration: 900, useNativeDriver: true }),
         Animated.timing(sunScale, { toValue: 1, duration: 900, useNativeDriver: true }),
-      ])
+      ]),
     );
     spin.start();
     pulse.start();
-    const timer = setTimeout(() => {
-      setIsSplashVisible(false);
-      setIsContentVisible(true);
-    }, 1500);
     return () => {
       spin.stop();
       pulse.stop();
-      clearTimeout(timer);
     };
-  }, []);
+  }, [sunAnimActive, sunRotate, sunScale]);
+
   useEffect(() => {
     let active = true;
+    const hasInitialNavCity = Boolean(route.params?.city ?? route.params?.selectedCity);
     const init = async () => {
-      const state = await NetInfo.fetch();
+      // Read connection state + Cache-First storage keys in parallel for fast startup.
+      const [netState, remember, saved, cached] = await Promise.all([
+        NetInfo.fetch().catch(() => ({ isConnected: true })),
+        loadRememberCity(),
+        loadLastCity(),
+        loadCachedWeather(),
+      ]);
       if (!active) return;
-      updateConnection(!!state.isConnected);
-      const remember = await loadRememberCity();
-      if (!active) return;
+      setIsConnected(!!netState.isConnected);
       rememberRef.current = remember;
-      setRememberCity(remember);
-      const saved = await loadLastCity();
-      if (!active) return;
-      // Cache-First: show the last snapshot instantly (no spinner),
-      // then refresh it in the background.
-      const cached = await loadCachedWeather();
-      if (!active) return;
+
+      // If a city selection via navigation or user action already started
+      // before init() finished reading AsyncStorage, do NOT overwrite or
+      // abort it with the previous cached city.
+      if (hasInitialNavCity || requestSeqRef.current > 0) {
+        return;
+      }
+
       let hasCache = false;
       if (cached) {
         hasCache = true;
@@ -1305,180 +453,59 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
     };
     init();
     const unsubscribe = NetInfo.addEventListener((state) => {
-      updateConnection(!!state.isConnected);
+      setIsConnected(!!state.isConnected);
       if (!state.isConnected) {
         setHostUnreachable(false);
       }
     });
-     return () => {
-       active = false;
-       unsubscribe();
-     };
-   }, []);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       (async () => {
         const remember = await loadRememberCity();
         rememberRef.current = remember;
-        setRememberCity(remember);
       })();
-    }, [])
+    }, []),
   );
-   useEffect(() => {
-     if (!isSplashVisible) {
+
+  useEffect(() => {
+    if (!isSplashVisible) {
       Animated.timing(splashOpacity, { toValue: 0, duration: 500, useNativeDriver: true }).start(
         ({ finished }) => {
           if (finished) setSplashRendered(false);
-        }
+        },
       );
     }
-  }, [isSplashVisible]);
+  }, [isSplashVisible, splashOpacity]);
+
   useEffect(() => {
     if (isContentVisible) {
       Animated.timing(contentOpacity, { toValue: 1, duration: 500, useNativeDriver: true }).start();
     }
-  }, [isContentVisible]);
-  useEffect(() => {
-    if (!settingsOpen) return;
-    Animated.parallel([
-      Animated.timing(settingsOverlayOpacity, {
-        toValue: 1,
-        duration: 300,
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
-      }),
-      Animated.timing(settingsScreenX, {
-        toValue: 0,
-        duration: 300,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-    ]).start();
-  }, [settingsOpen]);
-  useEffect(() => {
-    if (!themePickerVisible) return;
-    Animated.timing(pickerAnim, {
-      toValue: 1,
-      duration: 200,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [themePickerVisible]);
-  useEffect(() => {
-    if (!unitPickerVisible) return;
-    Animated.timing(tempPickerAnim, {
-      toValue: 1,
-      duration: 200,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [unitPickerVisible]);
-  useEffect(() => {
-    if (!languagePickerVisible) return;
-    Animated.timing(languagePickerAnim, {
-      toValue: 1,
-      duration: 200,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [languagePickerVisible]);
-  const openSettings = () => {
+  }, [isContentVisible, contentOpacity]);
+
+  const openSettings = useCallback(() => {
     navigation.getParent()?.navigate('Settings');
-  };
-  const closeSettings = () => {
-    if (themePickerVisible) closeThemePicker();
-    if (languagePickerVisible) closeLanguagePicker();
-    Animated.parallel([
-      Animated.timing(settingsOverlayOpacity, {
-        toValue: 0,
-        duration: 240,
-        easing: Easing.in(Easing.quad),
-        useNativeDriver: true,
-      }),
-      Animated.timing(settingsScreenX, {
-        toValue: SCREEN_WIDTH,
-        duration: 280,
-        easing: Easing.in(Easing.cubic),
-        useNativeDriver: true,
-      }),
-    ]).start(({ finished }) => {
-      if (finished) setSettingsOpen(false);
-    });
-  };
-  const openThemePicker = () => {
-    pickerAnim.setValue(0);
-    setThemePickerVisible(true);
-  };
-  const closeThemePicker = () => {
-    Animated.timing(pickerAnim, {
-      toValue: 0,
-      duration: 180,
-      easing: Easing.in(Easing.quad),
-      useNativeDriver: true,
-    }).start(({ finished }) => {
-      if (finished) setThemePickerVisible(false);
-    });
-  };
-  const selectThemeMode = async (value) => {
-    setThemeMode(value);
-    closeThemePicker();
-  };
-  const toggleRemember = async (value) => {
-    setRememberCity(value);
-    rememberRef.current = value;
-    await saveRememberCity(value);
-  };
-  const showUnitPicker = (mode) => {
-    setUnitPickerMode(mode);
-    tempPickerAnim.setValue(0);
-    setUnitPickerVisible(true);
-  };
-  const hideUnitPicker = () => {
-    Animated.timing(tempPickerAnim, {
-      toValue: 0,
-      duration: 180,
-      easing: Easing.in(Easing.quad),
-      useNativeDriver: true,
-    }).start(({ finished }) => {
-      if (finished) setUnitPickerVisible(false);
-    });
-  };
-  const onSelectUnit = async (value) => {
-    if (unitPickerMode === 'temp') {
-      await setTempUnit(value);
+  }, [navigation]);
+
+  const applyFetchError = (e) => {
+    if (isExternalAbortError(e)) return;
+    if (e?.kind === 'timeout') {
+      setError(null);
+      setHostUnreachable(true);
+    } else if (isOfflineError(e)) {
+      setError(tr('noInternet'));
     } else {
-      await setWindUnit(value);
+      setError(e?.message || tr('weatherFetchFailed'));
     }
-    hideUnitPicker();
   };
-  const openLanguagePicker = () => {
-    languagePickerAnim.setValue(0);
-    setLanguagePickerVisible(true);
-  };
-  const closeLanguagePicker = () => {
-    Animated.timing(languagePickerAnim, {
-      toValue: 0,
-      duration: 180,
-      easing: Easing.in(Easing.quad),
-      useNativeDriver: true,
-    }).start(({ finished }) => {
-      if (finished) setLanguagePickerVisible(false);
-    });
-  };
-  const selectLanguage = async (value) => {
-    await changeLanguage(value);
-    closeLanguagePicker();
-  };
-  const openGitHub = async () => {
-    try {
-      await Linking.openURL(GITHUB_URL);
-    } catch (e) {}
-  };
-  const geocode = async (query) => {
-    // 1. Current app language -> 2. English -> 3. transliterated Latin
-    // variants (shared helper, see geocoding.js). Only then "not found".
-    // Provider layer: OM search (transliteration included), Nominatim
-    // when OM yields nothing (same hit contract, region checks stay).
+
+  const geocode = async (query, fetchJson) => {
     const hit = await searchCity(query, i18n.language || 'ru', fetchJson);
     if (!hit) {
       throw new Error(tr('cityNotFound'));
@@ -1488,11 +515,8 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
     }
     return hit;
   };
-  // Name resolution with real fallbacks (native geocoder -> Open-Meteo
-  // -> BigDataCloud, see geocoding.js). Open-Meteo alone returns
-  // {error:"Not Found"} for rural coords (e.g. 56.21, 37.55), which used
-  // to leave the header stuck on "Current location".
-  const reverseGeocode = async (lat, lon) => {
+
+  const reverseGeocode = async (lat, lon, fetchJson) => {
     const resolved = await resolvePlaceName(lat, lon, i18n.language, fetchJson);
     return {
       name: resolved?.name || tr('currentLocation'),
@@ -1501,103 +525,188 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
       longitude: lon,
     };
   };
-  // Canonical forecast via the provider layer: Open-Meteo full shape,
-  // automatic 7Timer fallback with the SAME shape when OM is down or
-  // blocked. Result carries `source` ('open-meteo' | '7timer').
-  const fetchWeather = async (lat, lon) => {
+
+  // Canonical forecast via the provider layer: Open-Meteo full shape (with
+  // real feels-like, humidity, pressure, wind direction & precipitation
+  // probability in the SAME single request), automatic 7Timer fallback.
+  const fetchWeather = async (lat, lon, fetchJson) => {
     return fetchForecast(
       lat,
       lon,
       fetchJson,
-      `${BASE_URL}?latitude=${lat}&longitude=${lon}&current_weather=true&hourly=temperature_2m,weathercode&daily=weathercode,temperature_2m_max,temperature_2m_min,sunrise,sunset&timezone=auto`
+      `${BASE_URL}?latitude=${lat}&longitude=${lon}&current_weather=true&current=apparent_temperature,relative_humidity_2m,surface_pressure,precipitation_probability,wind_direction_10m&hourly=temperature_2m,weathercode,precipitation_probability&daily=weathercode,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max&timezone=auto`,
     );
   };
-  // Scenario A: refresh by saved coordinates — pure Open-Meteo fetch,
-  // never touches Location.*. Scenario B (geolocation) lives ONLY in
-  // detectMyLocation(), called from the "my location" button / first launch.
-  const loadByCoords = async (lat, lon, silent = false) => {
+
+  // Backfill missing country label (e.g. from saved cities / Phenomena / legacy
+  // cache) asynchronously without ever blocking or delaying the forecast render.
+  const enrichCountryInBackground = (place, data, savedAt, seq, signal) => {
+    if (!place || (place.country && !isCoordsLikeText(place.country))) return;
+    if (typeof place.latitude !== 'number' || typeof place.longitude !== 'number') return;
+    const revFetch = makeFetchJson(signal, 5000, 0);
+    resolvePlaceName(place.latitude, place.longitude, i18n.language || 'ru', revFetch)
+      .then((resolved) => {
+        if (seq !== requestSeqRef.current) return;
+        const country = resolved?.country;
+        if (!country || isCoordsLikeText(country)) return;
+        const enrichedPlace = { ...place, country };
+        const updated = { place: enrichedPlace, data, savedAt };
+        weatherRef.current = updated;
+        setWeather(updated);
+        saveCachedWeather({ place: enrichedPlace, data, query: enrichedPlace.name, savedAt });
+      })
+      .catch(() => {});
+  };
+
+  // Load weather for an already-known place (from CityList / Phenomena)
+  // without redundant geocoding.
+  const loadKnownPlace = async (place, silent = false) => {
+    const { seq, signal } = beginRequest();
+    const fetchJson = makeFetchJson(signal);
     if (!silent) setLoading(true);
     setError(null);
-    // Record intent BEFORE the attempt so Retry repeats this action
-    // even if it fails (previously only set on success, leaving a stale request).
-    lastRequest.current = { type: 'coords', lat, lon };
+    setHostUnreachable(false);
+    lastRequest.current = { type: 'coords', lat: place.latitude, lon: place.longitude, query: place.name };
     try {
-      const [place, data] = await Promise.all([reverseGeocode(lat, lon), fetchWeather(lat, lon)]);
+      const data = await fetchWeather(place.latitude, place.longitude, fetchJson);
+      if (seq !== requestSeqRef.current) return;
       const savedAt = Date.now();
       const snapshot = { place, data, savedAt };
       weatherRef.current = snapshot;
       setWeather(snapshot);
       setIsStale(false);
       await saveCachedWeather({ place, data, query: place.name, savedAt });
-      if (rememberRef.current && place.name && place.name !== tr('currentLocation')) {
+      if (rememberRef.current && place.name) {
         await saveLastCity(place.name);
       }
       setCity('');
+      enrichCountryInBackground(place, data, savedAt, seq, signal);
     } catch (e) {
-      if (isOfflineError(e)) {
-        setError(tr('noInternet'));
-      } else if (e.kind === 'network') {
-        setError(null);
-        setHostUnreachable(true);
-      } else {
-        setError(e.message || tr('weatherFetchFailed'));
+      if (seq !== requestSeqRef.current || isExternalAbortError(e)) return;
+      applyFetchError(e);
+      if (!silent && !weatherRef.current) {
+        setWeather(null);
       }
+    } finally {
+      if (seq === requestSeqRef.current) setLoading(false);
+    }
+  };
+
+  // Scenario A: refresh by saved coordinates — pure Open-Meteo fetch,
+  // never touches Location.*. Scenario B (geolocation) lives ONLY in
+  // detectMyLocation(), called from the "my location" button / first launch.
+  // Weather renders as soon as fetchWeather finishes; reverseGeocode runs in
+  // parallel and updates the header name/country without blocking the forecast.
+  const loadByCoords = async (lat, lon, silent = false, warningMsg = null) => {
+    const { seq, signal } = beginRequest();
+    const fetchJson = makeFetchJson(signal);
+    const reverseFetchJson = makeFetchJson(signal, 4000);
+    if (!silent) setLoading(true);
+    setError(warningMsg);
+    setHostUnreachable(false);
+    lastRequest.current = { type: 'coords', lat, lon };
+
+    let resolvedPlace = null;
+    const placePromise = reverseGeocode(lat, lon, reverseFetchJson)
+      .then((p) => {
+        resolvedPlace = p;
+        return p;
+      })
+      .catch(() => null);
+
+    try {
+      const data = await fetchWeather(lat, lon, fetchJson);
+      if (seq !== requestSeqRef.current) return;
+      const initialPlace = resolvedPlace || {
+        name: tr('currentLocation'),
+        country: '',
+        latitude: lat,
+        longitude: lon,
+      };
+      const savedAt = Date.now();
+      const snapshot = { place: initialPlace, data, savedAt };
+      weatherRef.current = snapshot;
+      setWeather(snapshot);
+      setIsStale(false);
+      setCity('');
+      if (seq === requestSeqRef.current) setLoading(false);
+
+      // Finish resolving the human-readable name in the background without
+      // blocking weather display or keeping the caller awaiting.
+      if (resolvedPlace) {
+        await saveCachedWeather({ place: resolvedPlace, data, query: resolvedPlace.name, savedAt });
+        if (rememberRef.current && resolvedPlace.name && resolvedPlace.name !== tr('currentLocation')) {
+          await saveLastCity(resolvedPlace.name);
+        }
+      } else {
+        void placePromise.then(async (resolved) => {
+          if (seq !== requestSeqRef.current) return;
+          const finalPlace = resolved || initialPlace;
+          const finalSnapshot = { place: finalPlace, data, savedAt };
+          weatherRef.current = finalSnapshot;
+          setWeather(finalSnapshot);
+          await saveCachedWeather({ place: finalPlace, data, query: finalPlace.name, savedAt });
+          if (rememberRef.current && finalPlace.name && finalPlace.name !== tr('currentLocation')) {
+            await saveLastCity(finalPlace.name);
+          }
+        });
+      }
+    } catch (e) {
+      if (seq !== requestSeqRef.current || isExternalAbortError(e)) return;
+      applyFetchError(e);
       if (!silent) {
         weatherRef.current = null;
         setWeather(null);
       }
     } finally {
-      setLoading(false);
+      if (seq === requestSeqRef.current) setLoading(false);
     }
   };
-  // No NetInfo gate here (or anywhere): NetInfo reports the VPN tunnel
-  // state, not real reachability — with a half-dead tunnel it says
-  // "offline" while the browser fetches fine. Always attempt; the catch
-  // below classifies the real error.
+
   const detectMyLocation = async () => {
-     setLocating(true);
-     setError(null);
-     try {
-       let { status } = await Location.getForegroundPermissionsAsync();
-       if (status !== 'granted') {
-         const permission = await Location.requestForegroundPermissionsAsync();
-         status = permission.status;
-       }
-       if (status !== 'granted') {
-         setPermissionModalVisible(true);
-         return;
-       }
-       const position = await Location.getCurrentPositionAsync({
-         accuracy: Location.Accuracy.Balanced,
-       });
-       const { latitude, longitude, accuracy } = position.coords;
-       if (accuracy && accuracy > 1000) {
-         setError("Геолокация приблизительная. Для точного прогноза включите 'Точное местоположение' в настройках.");
-       }
-       await loadByCoords(latitude, longitude);
-     } catch (e) {
-       setError(tr('locationFailed'));
-     } finally {
-       setLocating(false);
-     }
-   };
+    setLocating(true);
+    setError(null);
+    setHostUnreachable(false);
+    setDismissedMsg(null);
+    try {
+      const res = await acquireCurrentPosition(Location, { requestPermission: true });
+      if (res.status === 'denied') {
+        setPermissionModalVisible(true);
+        return;
+      }
+      if (res.status !== 'granted' || !res.position?.coords) {
+        setError(tr('locationFailed'));
+        return;
+      }
+      const { latitude, longitude, accuracy } = res.position.coords;
+      const approxWarning = accuracy && accuracy > 1000 ? tr('approximateLocation') : null;
+      setLocating(false);
+      await loadByCoords(latitude, longitude, false, approxWarning);
+    } catch (e) {
+      setError(tr('locationFailed'));
+    } finally {
+      setLocating(false);
+    }
+  };
+
   const doSearch = async (query, silent = false) => {
+    const { seq, signal } = beginRequest();
+    const fetchJson = makeFetchJson(signal);
     if (!silent) setLoading(true);
     setError(null);
-    // Record intent BEFORE the attempt so Retry repeats this exact search
-    // even when geocoding fails with "city not found".
+    setHostUnreachable(false);
     lastRequest.current = { type: 'city', query };
     try {
-      const place = await geocode(query);
-      const data = await fetchWeather(place.latitude, place.longitude);
+      const place = await geocode(query, fetchJson);
+      if (seq !== requestSeqRef.current) return;
+      const data = await fetchWeather(place.latitude, place.longitude, fetchJson);
+      if (seq !== requestSeqRef.current) return;
       const savedAt = Date.now();
       const snapshot = { place, data, savedAt };
       weatherRef.current = snapshot;
       setWeather(snapshot);
       setIsStale(false);
       await saveCachedWeather({ place, data, query, savedAt });
-      // Upgrade intent to coords so the next refresh uses saved
-      // coordinates directly (no re-geocode, never geolocation).
       if (typeof place.latitude === 'number' && typeof place.longitude === 'number') {
         lastRequest.current = { type: 'coords', lat: place.latitude, lon: place.longitude, query };
       }
@@ -1606,28 +715,34 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
       }
       setCity('');
     } catch (e) {
-      if (isOfflineError(e)) {
-        setError(tr('noInternet'));
-      } else if (e.kind === 'network') {
-        setError(null);
-        setHostUnreachable(true);
-      } else {
-        setError(e.message || tr('weatherFetchFailed'));
-      }
+      if (seq !== requestSeqRef.current || isExternalAbortError(e)) return;
+      applyFetchError(e);
       if (!silent) {
         weatherRef.current = null;
         setWeather(null);
       }
     } finally {
-      setLoading(false);
+      if (seq === requestSeqRef.current) setLoading(false);
     }
   };
+
   useEffect(() => {
-    if (cityParam && appliedCityParam.current !== cityParam) {
-      appliedCityParam.current = cityParam;
+    if (!cityParam) return;
+    const navKey = `${cityParam}|${latParam ?? ''}|${lonParam ?? ''}|${navTsParam ?? ''}`;
+    if (appliedCityParam.current === navKey) return;
+    appliedCityParam.current = navKey;
+    if (typeof latParam === 'number' && typeof lonParam === 'number' && Number.isFinite(latParam) && Number.isFinite(lonParam)) {
+      loadKnownPlace({
+        name: cityParam,
+        country: countryParam || '',
+        latitude: latParam,
+        longitude: lonParam,
+      });
+    } else {
       doSearch(cityParam);
     }
-  }, [cityParam]);
+  }, [cityParam, latParam, lonParam, countryParam, navTsParam]);
+
   const search = () => {
     const query = city.trim();
     if (!query) {
@@ -1637,42 +752,38 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
     Keyboard.dismiss();
     doSearch(query);
   };
+
   // Swipe/Retry refresh: fetch ONLY fresh weather data for the currently
-  // displayed place and keep its name/country untouched. This is what
-  // prevents "Дмитров" from turning into "Текущее местоположение" after
-  // a swipe — unlike loadByCoords(), it never runs reverseGeocode().
+  // displayed place and keep its name/country untouched.
   const refreshCurrentWeather = async (silent = false) => {
     const cur = weatherRef.current;
     if (!cur || !cur.place || typeof cur.place.latitude !== 'number' || typeof cur.place.longitude !== 'number') {
       return false;
     }
+    const { seq, signal } = beginRequest();
+    const fetchJson = makeFetchJson(signal);
     if (!silent) setLoading(true);
     setError(null);
+    setHostUnreachable(false);
     try {
-      const data = await fetchWeather(cur.place.latitude, cur.place.longitude);
+      const data = await fetchWeather(cur.place.latitude, cur.place.longitude, fetchJson);
+      if (seq !== requestSeqRef.current) return false;
       const savedAt = Date.now();
       const snapshot = { place: cur.place, data, savedAt };
       weatherRef.current = snapshot;
       setWeather(snapshot);
       setIsStale(false);
       const q = lastRequest.current?.query ?? cur.place.name;
-      if (typeof cur.place.latitude === 'number' && typeof cur.place.longitude === 'number') {
-        lastRequest.current = { type: 'coords', lat: cur.place.latitude, lon: cur.place.longitude, query: q ?? null };
-      }
+      lastRequest.current = { type: 'coords', lat: cur.place.latitude, lon: cur.place.longitude, query: q ?? null };
       await saveCachedWeather({ place: cur.place, data, query: q, savedAt });
+      enrichCountryInBackground(cur.place, data, savedAt, seq, signal);
       return true;
     } catch (e) {
-      if (isOfflineError(e)) {
-        setError(tr('noInternet'));
-      } else if (e.kind === 'network') {
-        setError(null);
-        setHostUnreachable(true);
-      } else {
-        setError(e.message || tr('weatherFetchFailed'));
-      }
+      if (seq !== requestSeqRef.current || isExternalAbortError(e)) return false;
+      applyFetchError(e);
       return false;
     } finally {
-      if (!silent) setLoading(false);
+      if (!silent && seq === requestSeqRef.current) setLoading(false);
     }
   };
   // Shared refresh target: Scenario A only (saved city coords).
@@ -1721,13 +832,20 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
   }, []);
   const retryConnection = async () => {
     if (retrying) return;
+    // If the visible banner is specifically a failed GPS attempt, "Retry"
+    // should retry geolocation rather than silently reloading the old city.
+    if (error === tr('locationFailed')) {
+      await detectMyLocation();
+      return;
+    }
     setRetrying(true);
     try {
-      const state = await NetInfo.fetch();
-      updateConnection(!!state.isConnected);
+      const state = await NetInfo.fetch().catch(() => ({ isConnected: true }));
+      setIsConnected(!!state.isConnected);
       // No gate: a lying "offline" must not disable Retry — the attempt
       // below proves reachability one way or the other.
       setHostUnreachable(false);
+      setDismissedMsg(null);
       // Primary path: keep the current header, only reload the data.
       const hadPlace = !!weatherRef.current?.place;
       if (await refreshCurrentWeather(false)) return;
@@ -1830,11 +948,10 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
   }, [isSplashVisible, themeLoaded, loading, locating, weather]);
   useLayoutEffect(() => {
     const hideTabs =
-      settingsOpen ||
       isSplashVisible ||
       !themeLoaded ||
       ((loading || locating) && weather === null);
-     navigation.setOptions({
+    navigation.setOptions({
       tabBarStyle: {
         backgroundColor: theme.background,
         borderTopColor: theme.border,
@@ -1843,9 +960,30 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
         display: hideTabs ? 'none' : 'flex',
       },
       tabBarActiveTintColor: theme.mode === 'light' ? '#3b82f6' : '#fbbf24',
-      tabBarInactiveTintColor: theme.mode === 'light' ? '#94a3b8' : '#94a3b8',
+      tabBarInactiveTintColor: '#94a3b8',
     });
-  }, [settingsOpen, isSplashVisible, themeLoaded, loading, locating, weather, theme, navigation]);
+  }, [isSplashVisible, themeLoaded, loading, locating, weather, theme, navigation]);
+
+  const hourlyTimeline = useMemo(
+    () => getHourlyTimeline(weather?.data),
+    [weather?.data],
+  );
+  const weeklyBounds = useMemo(
+    () => computeWeeklyTempBounds(weather?.data?.daily),
+    [weather?.data?.daily],
+  );
+  const currentExtras = useMemo(
+    () => extractCurrentExtras(weather?.data),
+    [weather?.data],
+  );
+  const pressureDisplay = useMemo(() => {
+    if (currentExtras.pressureHpa === null) return null;
+    if (i18n.language === 'en') {
+      return `${Math.round(currentExtras.pressureHpa)} ${tr('pressureUnitHpa')}`;
+    }
+    const mm = hpaToMmHg(currentExtras.pressureHpa);
+    return mm !== null ? `${mm} ${tr('pressureUnitMmHg')}` : null;
+  }, [currentExtras.pressureHpa, tr, i18n.language]);
   const currentIsNight =
     weather &&
     weather.data &&
@@ -1862,7 +1000,8 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
     if (code <= 48) return tr('condition.fog');
     if (code <= 67) return tr('condition.rain');
     if (code <= 77) return tr('condition.snow');
-    if (code <= 86) return tr('condition.showers');
+    if (code <= 82) return tr('condition.showers');
+    if (code <= 86) return tr('condition.snow');
     return tr('condition.thunder');
   };
   if (!themeLoaded || !fs) {
@@ -1900,8 +1039,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                     style={styles.menuItem}
                     scaleTo={0.98}
                     onPress={() => {
-                      closeMenu();
-                      navigation.navigate('CityList');
+                      dismissMenuAndNavigate(() => navigation.navigate('CityList'));
                     }}
                   >
                     <Text style={[styles.menuItemText, { color: theme.text }]} numberOfLines={1} ellipsizeMode="tail">{tr('cities.title')}</Text>
@@ -1911,8 +1049,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                     style={styles.menuItem}
                     scaleTo={0.98}
                     onPress={() => {
-                      closeMenu();
-                      openSettings();
+                      dismissMenuAndNavigate(() => openSettings());
                     }}
                   >
                     <Text style={[styles.menuItemText, { color: theme.text }]} numberOfLines={1} ellipsizeMode="tail">{tr('settings')}</Text>
@@ -2046,6 +1183,15 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
               </PressableScale>
             </View>
           )}
+          {/* Inline progress indicator when switching cities or locating over an existing view */}
+          {(loading || locating) && !!weather && (
+            <View style={styles.inlineStatusRow}>
+              <ActivityIndicator size="small" color={theme.accent} />
+              <Text style={styles.inlineStatusText}>
+                {locating ? tr('locating') : tr('loading')}
+              </Text>
+            </View>
+          )}
           {/* Cache-First: spinner only when there is nothing to show yet. */}
           {(loading || locating) && !weather && (
             <View style={styles.center}>
@@ -2071,22 +1217,23 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                   {tr('cachedAt', { time: formatCacheTime(weather.savedAt) })}
                 </Text>
               )}
-              <Pressable onLongPress={copyCoords} delayLongPress={500} hitSlop={8}>
-                <Text style={styles.subLabel}>
-                  {(() => {
-                    const coordsLabel = `${weather.place.latitude.toFixed(2)}, ${weather.place.longitude.toFixed(2)}`;
-                    const norm = (s) => String(s || '').replace(/\s+/g, '');
-                    const showCountry =
-                      weather.place.country &&
-                      !isCoordsLikeText(weather.place.country) &&
-                      norm(weather.place.country) !== norm(coordsLabel);
-                    return `${showCountry ? `${weather.place.country} · ` : ''}${coordsLabel}`;
-                  })()}
-                </Text>
-                {coordsCopied && Platform.OS !== 'android' && (
-                  <Text style={styles.copiedHint}>{tr('coordsCopied')}</Text>
-                )}
-              </Pressable>
+              {(() => {
+                const subtitle = formatLocationSubtitle(weather.place, locationSubtitleMode);
+                if (!subtitle) return null;
+                const canCopyCoords = locationSubtitleMode !== 'country';
+                return (
+                  <Pressable
+                    onLongPress={canCopyCoords ? copyCoords : undefined}
+                    delayLongPress={500}
+                    hitSlop={8}
+                  >
+                    <Text style={styles.subLabel}>{subtitle}</Text>
+                    {coordsCopied && Platform.OS !== 'android' && (
+                      <Text style={styles.copiedHint}>{tr('coordsCopied')}</Text>
+                    )}
+                  </Pressable>
+                );
+              })()}
               {showSourceBadge && weather?.data?.source && weather.data.source !== 'open-meteo' ? (
                 <Text style={[styles.cityTime, { opacity: 0.75 }]}>
                   {tr('reserveSource', { source: SOURCE_NAMES[weather.data.source] || weather.data.source })}
@@ -2094,7 +1241,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
               ) : null}
               {cityTime && <Text style={styles.cityTime}>{tr('localTime')} {cityTime}</Text>}
               <View style={styles.bigIconWrap}>
-                {currentType === 'clear' ? (
+                {currentType === 'clear' && !currentIsNight ? (
                   <SunAnimation size={100} />
                 ) : currentType === 'fog' ? (
                   <FogAnimation size={100} />
@@ -2104,29 +1251,52 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
               </View>
               <CrossfadeValue
                 style={styles.temperature}
-                value={formatTemp(weather.data.current_weather.temperature, tempUnit)}
+                value={formatTemp(weather.data.current_weather?.temperature, tempUnit)}
               />
               <CrossfadeValue
                 style={styles.condition}
-                value={conditionFor(weather.data.current_weather.weathercode)}
+                value={conditionFor(weather.data.current_weather?.weathercode)}
               />
-              <View style={styles.detailRow}>
+              {currentExtras.feelsLike !== null && (
+                <Text style={styles.feelsLikeText}>
+                  {tr('feelsLike', { temp: formatTemp(currentExtras.feelsLike, tempUnit) })}
+                </Text>
+              )}
+              <View style={styles.detailGrid}>
                 <View style={styles.detailCard}>
-                   <CrossfadeValue
-                     style={styles.detailValue}
-                     value={formatWind(weather.data.current_weather.windspeed, windUnit)}
-                   />
-                   <Text style={styles.detailLabel}>{tr('wind')}</Text>
+                  <CrossfadeValue
+                    style={styles.detailValue}
+                    value={formatWind(weather.data.current_weather?.windspeed, windUnit, currentExtras.windDirection)}
+                  />
+                  <Text style={styles.detailLabel}>{tr('wind')}</Text>
                 </View>
                 <View style={styles.detailCard}>
                   <CrossfadeValue
                     style={styles.detailValue}
-                    value={weather.data.current_weather.is_day ? tr('day') : tr('night')}
+                    value={weather.data.current_weather?.is_day ? tr('day') : tr('night')}
                   />
-                   <Text style={styles.detailLabel}>{tr('timeOfDay')}</Text>
+                  <Text style={styles.detailLabel}>{tr('timeOfDay')}</Text>
                 </View>
-               </View>
-              {weather.data && (
+                {currentExtras.humidity !== null && (
+                  <View style={styles.detailCard}>
+                    <CrossfadeValue
+                      style={styles.detailValue}
+                      value={`${Math.round(currentExtras.humidity)}%`}
+                    />
+                    <Text style={styles.detailLabel}>{tr('humidity')}</Text>
+                  </View>
+                )}
+                {pressureDisplay !== null && (
+                  <View style={styles.detailCard}>
+                    <CrossfadeValue
+                      style={styles.detailValue}
+                      value={pressureDisplay}
+                    />
+                    <Text style={styles.detailLabel}>{tr('pressure')}</Text>
+                  </View>
+                )}
+              </View>
+              {hourlyTimeline.length > 0 && (
                 <>
                   <Text style={styles.sectionTitle}>{tr('hourlyForecast')}</Text>
                   <ScrollView
@@ -2134,7 +1304,7 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                     showsHorizontalScrollIndicator={false}
                     contentContainerStyle={styles.hourlyRow}
                   >
-                    {getHourlyTimeline(weather.data).map((item, idx) => {
+                    {hourlyTimeline.map((item, idx) => {
                       if (item.type === 'sunrise' || item.type === 'sunset') {
                         const isSunrise = item.type === 'sunrise';
                         return (
@@ -2150,13 +1320,18 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                       return (
                         <View key={`${item.type}-${item.time}`} style={styles.hourlyCard}>
                           <Text style={styles.hourlyTemp} numberOfLines={1}>
-                            {item.temp === null || item.temp === undefined ? '–' : formatTemp(item.temp, tempUnit)}
+                            {formatTemp(item.temp, tempUnit)}
                           </Text>
                           <WeatherIcon
                             type={weathercodeToType(item.code)}
                             isNight={isNightHour(item.time)}
                             size={26}
                           />
+                          {typeof item.precipProb === 'number' && item.precipProb >= 20 ? (
+                            <Text style={styles.hourlyPrecip} numberOfLines={1}>
+                              {item.precipProb}%
+                            </Text>
+                          ) : null}
                           <Text style={styles.hourlyTime}>{idx === 0 ? tr('now') : String(item.time).slice(11, 16)}</Text>
                         </View>
                       );
@@ -2164,23 +1339,76 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
                   </ScrollView>
                 </>
               )}
-                <Text style={styles.sectionTitle}>{tr('weeklyForecast')}</Text>
-               {weather.data.daily && weather.data.daily.time && weather.data.daily.time.map((day, i) => (
-                <View key={day} style={styles.forecastRow}>
-                  <Text style={styles.forecastDay}>{formatDay(day)}</Text>
-                  <View style={styles.forecastIconCell}>
-                    <WeatherIcon
-                      type={weathercodeToType(weather.data.daily.weathercode[i])}
-                      isNight={false}
-                      size={26}
-                    />
+              <Text style={styles.sectionTitle}>{tr('weeklyForecast')}</Text>
+              {weather.data.daily && Array.isArray(weather.data.daily.time) && weather.data.daily.time.map((day, i) => {
+                const dayMin = weather.data.daily.temperature_2m_min?.[i];
+                const dayMax = weather.data.daily.temperature_2m_max?.[i];
+                const dayProb = weather.data.daily.precipitation_probability_max?.[i];
+                const range = weeklyBounds
+                  ? computeDayRangeFractions(dayMin, dayMax, weeklyBounds.min, weeklyBounds.max)
+                  : null;
+                const barColors = computeTempRangeColors(dayMin, dayMax);
+                const currentDotPct = i === 0 && weeklyBounds
+                  ? computeCurrentTempPct(
+                      weather.data.current_weather?.temperature,
+                      weeklyBounds.min,
+                      weeklyBounds.max,
+                      range
+                    )
+                  : null;
+                return (
+                  <View key={day} style={styles.forecastRow}>
+                    <Text
+                      style={[styles.forecastDay, i === 0 && styles.forecastDayToday]}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.85}
+                    >
+                      {i === 0 ? tr('today') : formatDay(day)}
+                    </Text>
+                    <View style={styles.forecastIconCell}>
+                      <WeatherIcon
+                        type={weathercodeToType(weather.data.daily.weathercode?.[i])}
+                        isNight={false}
+                        size={26}
+                      />
+                      {typeof dayProb === 'number' && dayProb >= 20 ? (
+                        <Text style={styles.forecastPrecip}>{Math.round(dayProb)}%</Text>
+                      ) : null}
+                    </View>
+                    <Text style={styles.forecastTempMin} numberOfLines={1}>
+                      {formatTemp(dayMin, tempUnit)}
+                    </Text>
+                    {range && (
+                      <View style={styles.rangeBarWrap}>
+                        <View style={styles.rangeBarTrack}>
+                          <LinearGradient
+                            colors={barColors}
+                            start={{ x: 0, y: 0.5 }}
+                            end={{ x: 1, y: 0.5 }}
+                            style={[
+                              styles.rangeBarFill,
+                              { left: `${range.leftPct}%`, width: `${range.widthPct}%` },
+                            ]}
+                          />
+                        </View>
+                        {currentDotPct !== null && (
+                          <View
+                            pointerEvents="none"
+                            style={[
+                              styles.rangeCurrentDot,
+                              { left: `${currentDotPct}%` },
+                            ]}
+                          />
+                        )}
+                      </View>
+                    )}
+                    <Text style={styles.forecastTempMax} numberOfLines={1}>
+                      {formatTemp(dayMax, tempUnit)}
+                    </Text>
                   </View>
-                  <Text style={styles.forecastTemp} numberOfLines={1}>
-                    {formatTemp(weather.data.daily.temperature_2m_min[i], tempUnit)} /{' '}
-                    {formatTemp(weather.data.daily.temperature_2m_max[i], tempUnit)}
-                  </Text>
-                </View>
-              ))}
+                );
+              })}
             </HeroReveal>
           )}
            {!loading && !locating && !weather && (
@@ -2207,312 +1435,6 @@ const SOURCE_NAMES = { '7timer': '7Timer', 'open-meteo': 'Open-Meteo', nominatim
             </Animated.View>
             <Text style={styles.splashText}>{tr('splashText')}</Text>
           </Animated.View>
-        )}
-        {settingsOpen && (
-          <View style={styles.settingsLayer} pointerEvents="box-none">
-            <Animated.View style={[styles.settingsDim, { opacity: settingsOverlayOpacity }]} />
-            <Animated.View
-              style={[styles.settingsScreen, { transform: [{ translateX: settingsScreenX }] }]}
-            >
-              <SafeAreaView style={styles.settingsSafe}>
-                <View style={styles.settingsHeader}>
-                  <TouchableOpacity
-                    style={styles.settingsBackButton}
-                    onPress={closeSettings}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={styles.settingsBackIcon}>←</Text>
-                  </TouchableOpacity>
-                   <Text style={styles.settingsHeaderTitle}>{tr('about')}</Text>
-                </View>
-                <ScrollView
-                  style={styles.settingsBody}
-                  contentContainerStyle={styles.settingsBodyContent}
-                >
-                  <View style={styles.settingsHero}>
-                     <Image source={APP_ICON_SOURCE} style={styles.heroAppIcon} resizeMode="contain" />
-                     <Text style={styles.heroTitle}>{tr('weather')}</Text>
-                     <Text style={styles.heroAuthor}>{tr('byAuthor')}</Text>
-                     <Text style={styles.heroVersion}>{tr('version', { version: APP_VERSION })}</Text>
-                  </View>
-                    <Text style={styles.settingsSectionTitle}>{tr('settings')}</Text>
-                    <View style={styles.cardStack}>
-                       <View style={styles.aboutCard}>
-                         <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                           <Text style={styles.aboutCardTitle}>{tr('rememberCity')}</Text>
-                           <Text style={styles.aboutCardDesc}>
-                             {tr('rememberCityDesc')}
-                           </Text>
-                         </View>
-                         <Switch
-                           style={{ flexShrink: 0, alignSelf: 'center', marginLeft: 10 }}
-                           value={rememberCity}
-                           onValueChange={toggleRemember}
-                           trackColor={{ false: switchTrackOff, true: theme.accent2 }}
-                           thumbColor="#ffffff"
-                           ios_backgroundColor={switchTrackOff}
-                         />
-                       </View>
-                    </View>
-                    <Text style={styles.settingsSectionTitle}>{tr('interface')}</Text>
-                   <View style={styles.cardStack}>
-                      <TouchableOpacity
-                        style={styles.aboutCard}
-                        onPress={openThemePicker}
-                        activeOpacity={0.6}
-                      >
-                        <View style={styles.interfaceIconWrap}>
-                          <Text style={styles.interfaceIconEmoji}>🎨</Text>
-                        </View>
-                        <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                          <Text style={styles.aboutCardTitle}>{tr('appTheme')}</Text>
-                          <Text style={styles.aboutCardDesc}>{currentThemeLabel}</Text>
-                        </View>
-                        <Text style={styles.settingsChevron}>›</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.aboutCard}
-                        onPress={openLanguagePicker}
-                        activeOpacity={0.6}
-                      >
-                        <View style={styles.interfaceIconWrap}>
-                          <Text style={styles.interfaceIconEmoji}>🌐</Text>
-                        </View>
-                        <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                          <Text style={styles.aboutCardTitle}>{tr('language')}</Text>
-                          <Text style={styles.aboutCardDesc}>
-                            {i18n.language === 'ru' ? tr('russian') : tr('english')}
-                          </Text>
-                        </View>
-                        <Text style={styles.settingsChevron}>›</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <Text style={styles.settingsSectionTitle}>{tr('units')}</Text>
-                    <View style={styles.cardStack}>
-                      <TouchableOpacity
-                        style={styles.aboutCard}
-                        onPress={() => showUnitPicker('temp')}
-                        activeOpacity={0.6}
-                      >
-                        <View style={styles.interfaceIconWrap}>
-                          <Text style={styles.interfaceIconEmoji}>🌡️</Text>
-                        </View>
-                        <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                          <Text style={styles.aboutCardTitle}>{tr('temperature')}</Text>
-                          <Text style={styles.aboutCardDesc}>
-                            {tr(TEMP_UNIT_OPTIONS.find((o) => o.value === tempUnit)?.labelKey ?? 'tempUnits.C.label')}
-                          </Text>
-                        </View>
-                        <Text style={styles.settingsChevron}>›</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.aboutCard}
-                        onPress={() => showUnitPicker('wind')}
-                        activeOpacity={0.6}
-                      >
-                        <View style={styles.interfaceIconWrap}>
-                          <Text style={styles.interfaceIconEmoji}>💨</Text>
-                        </View>
-                        <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                          <Text style={styles.aboutCardTitle}>{tr('windSpeed')}</Text>
-                          <Text style={styles.aboutCardDesc}>
-                            {tr(WIND_UNIT_OPTIONS.find((o) => o.value === windUnit)?.labelKey ?? 'windUnits.kmh.label')}
-                          </Text>
-                        </View>
-                        <Text style={styles.settingsChevron}>›</Text>
-                      </TouchableOpacity>
-                    </View>
-                   <Text style={styles.settingsSectionTitle}>{tr('aboutProject')}</Text>
-                   <View style={styles.cardStack}>
-                     <TouchableOpacity
-                       style={styles.aboutCard}
-                       onPress={openGitHub}
-                       activeOpacity={0.6}
-                      >
-                        <View style={styles.githubIconWrap}>
-                          <GithubIcon size={22} color={theme.text} />
-                        </View>
-                        <View style={[styles.aboutCardTextWrap, { flex: 1 }]}>
-                          <Text style={styles.aboutCardTitle}>{tr('sourceCode')}</Text>
-                          <Text style={styles.aboutCardDesc}>
-                            {tr('githubDesc')}
-                          </Text>
-                        </View>
-                        <Text style={styles.settingsChevron}>›</Text>
-                      </TouchableOpacity>
-                  </View>
-                </ScrollView>
-                {themePickerVisible && (
-                  <View style={styles.pickerLayer} pointerEvents="box-none">
-                    <Animated.View style={[styles.pickerBackdrop, { opacity: pickerAnim }]}>
-                      <TouchableOpacity
-                        style={StyleSheet.absoluteFill}
-                        activeOpacity={1}
-                        onPress={closeThemePicker}
-                      />
-                    </Animated.View>
-                    <Animated.View
-                      style={[
-                        styles.pickerCard,
-                        {
-                          opacity: pickerAnim,
-                          transform: [
-                            {
-                              scale: pickerAnim.interpolate({
-                                inputRange: [0, 1],
-                                outputRange: [0.92, 1],
-                              }),
-                            },
-                          ],
-                        },
-                      ]}
-                    >
-                      <Text style={styles.pickerTitle}>{tr('appTheme')}</Text>
-                      {THEME_MODES.map((m) => {
-                        const selected = m.value === themeMode;
-                        return (
-                          <TouchableOpacity
-                            key={m.value}
-                            style={styles.pickerOption}
-                            onPress={() => selectThemeMode(m.value)}
-                            activeOpacity={0.6}
-                          >
-                            <View
-                              style={[styles.radioOuter, selected && { borderColor: theme.accent }]}
-                            >
-                              {selected && (
-                                <View
-                                  style={[styles.radioInner, { backgroundColor: theme.accent }]}
-                                />
-                              )}
-                            </View>
-                            <View style={styles.pickerOptionTextWrap}>
-                              <Text style={styles.pickerOptionLabel}>{tr(m.labelKey)}</Text>
-                              <Text style={styles.pickerOptionDesc}>{tr(m.descKey)}</Text>
-                            </View>
-                          </TouchableOpacity>
-                        );
-                       })}
-                     </Animated.View>
-                   </View>
-                 )}
-                 {unitPickerVisible && (
-                   <View style={styles.pickerLayer} pointerEvents="box-none">
-                     <Animated.View style={[styles.pickerBackdrop, { opacity: tempPickerAnim }]}>
-                       <TouchableOpacity
-                         style={StyleSheet.absoluteFill}
-                         activeOpacity={1}
-                         onPress={hideUnitPicker}
-                       />
-                     </Animated.View>
-                     <Animated.View
-                       style={[
-                         styles.pickerCard,
-                         {
-                           opacity: tempPickerAnim,
-                           transform: [
-                             {
-                               scale: tempPickerAnim.interpolate({
-                                 inputRange: [0, 1],
-                                 outputRange: [0.92, 1],
-                               }),
-                             },
-                           ],
-                         },
-                       ]}
-                     >
-                        <Text style={styles.pickerTitle}>
-                          {unitPickerMode === 'temp' ? tr('temperature') : tr('windSpeed')}
-                        </Text>
-                        {(unitPickerMode === 'temp' ? TEMP_UNIT_OPTIONS : WIND_UNIT_OPTIONS).map(
-                          (o) => {
-                            const selected =
-                              (unitPickerMode === 'temp'
-                                ? o.value === tempUnit
-                                : o.value === windUnit) || false;
-                            return (
-                              <TouchableOpacity
-                                key={o.value}
-                                style={styles.pickerOption}
-                                onPress={() => onSelectUnit(o.value)}
-                                activeOpacity={0.6}
-                              >
-                                <View
-                                  style={[styles.radioOuter, selected && { borderColor: theme.accent }]}
-                                >
-                                  {selected && (
-                                    <View
-                                      style={[styles.radioInner, { backgroundColor: theme.accent }]}
-                                    />
-                                  )}
-                                </View>
-                                <View style={styles.pickerOptionTextWrap}>
-                                  <Text style={styles.pickerOptionLabel}>{tr(o.labelKey)}</Text>
-                                  <Text style={styles.pickerOptionDesc}>{tr(o.descKey)}</Text>
-                                </View>
-                              </TouchableOpacity>
-                            );
-                          },
-                        )}
-                     </Animated.View>
-                   </View>
-                 )}
-                   {languagePickerVisible && (
-                     <View style={styles.pickerLayer} pointerEvents="box-none">
-                       <Animated.View style={[styles.pickerBackdrop, { opacity: languagePickerAnim }]}>
-                         <TouchableOpacity
-                           style={StyleSheet.absoluteFill}
-                           activeOpacity={1}
-                           onPress={closeLanguagePicker}
-                         />
-                       </Animated.View>
-                       <Animated.View
-                         style={[
-                           styles.pickerCard,
-                           {
-                             opacity: languagePickerAnim,
-                             transform: [
-                               {
-                                 scale: languagePickerAnim.interpolate({
-                                   inputRange: [0, 1],
-                                   outputRange: [0.92, 1],
-                                 }),
-                               },
-                             ],
-                           },
-                         ]}
-                       >
-                         <Text style={styles.pickerTitle}>{tr('language')}</Text>
-                         {LANGUAGE_OPTIONS.map((lang) => {
-                           const selected = lang.value === i18n.language;
-                           return (
-                             <TouchableOpacity
-                               key={lang.value}
-                               style={styles.pickerOption}
-                               onPress={() => selectLanguage(lang.value)}
-                               activeOpacity={0.6}
-                             >
-                               <View
-                                 style={[styles.radioOuter, selected && { borderColor: theme.accent }]}
-                               >
-                                 {selected && (
-                                   <View
-                                     style={[styles.radioInner, { backgroundColor: theme.accent }]}
-                                   />
-                                 )}
-                               </View>
-                               <View style={styles.pickerOptionTextWrap}>
-                                 <Text style={styles.pickerOptionLabel}>{tr(lang.labelKey)}</Text>
-                               </View>
-                             </TouchableOpacity>
-                           );
-                         })}
-                       </Animated.View>
-                     </View>
-                   )}
-                 </SafeAreaView>
-            </Animated.View>
-          </View>
         )}
         <PermissionModal
           visible={permissionModalVisible}
@@ -2600,38 +1522,24 @@ function formatCacheTime(ts) {
   }
 }
 
-function computeCityClock(data) {
-  if (!data || typeof data.utc_offset_seconds !== 'number') return null;
-  const now = new Date();
-  const cityMs = now.getTime() + now.getTimezoneOffset() * 60000 + data.utc_offset_seconds * 1000;
-  const d = new Date(cityMs);
-  return (
-    String(d.getHours()).padStart(2, '0') +
-    ':' +
-    String(d.getMinutes()).padStart(2, '0')
-  );
-}
 
 const preloadStyles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#1c2333' },
   fill: { flex: 1 },
 });
 
-const buildStyles = (theme, fs, insets) =>
-  StyleSheet.create({
+const buildStyles = (theme, fs, insets) => {
+  const isLight = theme.mode === 'light';
+  return StyleSheet.create({
     safe: { flex: 1, backgroundColor: theme.background },
     splash: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.background, alignItems: 'center', justifyContent: 'center' },
     splashIconWrap: { marginBottom: fs.spacing },
     splashText: { color: theme.textSecondary, fontSize: fs.small },
-    title: { fontSize: fs.base * 2, fontWeight: '700', color: theme.text, textAlign: 'center', marginTop: 0, marginLeft: 0 },
     container: { flex: 1, position: 'relative', paddingHorizontal: fs.spacing },
-    titleRow: { display: 'none' },
-    gearButton: { width: fs.spacing * 2.75, height: fs.spacing * 3, alignItems: 'center', justifyContent: 'center', marginLeft: fs.spacing * 0.25 },
-    gearIcon: { fontSize: fs.iconSize },
-    menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: 60, paddingRight: 16 },
-    dropdownMenu: { minWidth: 220, borderRadius: 16, borderWidth: 1, paddingVertical: 6, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
-    menuItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 18 },
-    menuItemText: { fontSize: 16, fontWeight: '600' },
+    menuBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-start', alignItems: 'flex-end', paddingTop: Math.max(insets.top, 8) + 4, paddingRight: fs.spacing },
+    dropdownMenu: { minWidth: 220, borderRadius: 16, borderWidth: 1, paddingVertical: 4, elevation: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
+    menuItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 13, paddingHorizontal: 18 },
+    menuItemText: { fontSize: fs.base, fontWeight: '600' },
     menuDivider: { height: 1, width: '100%', marginVertical: 2 },
     searchBarContainer: {
       flexDirection: 'row',
@@ -2646,7 +1554,7 @@ const buildStyles = (theme, fs, insets) =>
       borderColor: theme.border || 'rgba(255,255,255,0.08)',
       shadowColor: '#000',
       shadowOffset: { width: 0, height: 4 },
-      shadowOpacity: 0.15,
+      shadowOpacity: isLight ? 0.08 : 0.15,
       shadowRadius: 8,
       elevation: 4,
     },
@@ -2664,7 +1572,7 @@ const buildStyles = (theme, fs, insets) =>
     animatedPlaceholder: {
       position: 'absolute',
       left: fs.spacing * 0.5,
-      color: theme.textMuted || 'rgba(255,255,255,0.4)',
+      color: theme.textMuted,
       fontSize: fs.base,
     },
     searchInput: {
@@ -2681,22 +1589,58 @@ const buildStyles = (theme, fs, insets) =>
       alignItems: 'center',
       marginLeft: 4,
     },
-    searchRow: { flexDirection: 'row', alignItems: 'center', marginBottom: fs.spacing * 0.625, paddingTop: fs.spacing * 0.35 },
-    input: { flex: 1, height: fs.spacing * 3, backgroundColor: theme.surface, borderRadius: 12, paddingHorizontal: fs.spacing * 0.875, color: theme.text, fontSize: fs.base, marginRight: fs.spacing * 0.5 },
-    button: { height: fs.spacing * 3, paddingHorizontal: fs.spacing * 1.15, backgroundColor: theme.accent, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-    locButton: { backgroundColor: theme.accent2, marginBottom: fs.spacing },
-    buttonDisabled: { opacity: 0.5 },
-    buttonText: { color: theme.onAccent, fontSize: fs.base, fontWeight: '600' },
-    infoBanner: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff9c4', borderRadius: 10, paddingVertical: fs.spacing * 0.625, paddingHorizontal: fs.spacing * 0.75, marginBottom: fs.spacing },
-    infoBannerVpn: { backgroundColor: '#ffe0b2' },
-    infoBannerOffline: { backgroundColor: '#fdecea' },
-    infoBannerText: { flex: 1, color: '#4a3000', fontSize: fs.small, fontWeight: '600', marginRight: fs.spacing * 0.5 },
-    infoBannerTextOffline: { color: '#7a1c1c' },
-    bannerButton: { backgroundColor: '#4a3000', borderRadius: 8, paddingVertical: fs.spacing * 0.375, paddingHorizontal: fs.spacing * 0.625, marginRight: fs.spacing * 0.5 },
-    bannerButtonText: { color: '#fff3cd', fontSize: fs.small, fontWeight: '700' },
+    infoBanner: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: isLight ? '#fff8e1' : 'rgba(255, 193, 7, 0.14)',
+      borderWidth: 1,
+      borderColor: isLight ? '#ffe082' : 'rgba(255, 193, 7, 0.35)',
+      borderRadius: 12,
+      paddingVertical: fs.spacing * 0.625,
+      paddingHorizontal: fs.spacing * 0.75,
+      marginBottom: fs.spacing * 0.75,
+    },
+    infoBannerVpn: {
+      backgroundColor: isLight ? '#fff3e0' : 'rgba(255, 159, 10, 0.15)',
+      borderColor: isLight ? '#ffcc80' : 'rgba(255, 159, 10, 0.38)',
+    },
+    infoBannerOffline: {
+      backgroundColor: isLight ? '#fdecea' : 'rgba(255, 69, 58, 0.15)',
+      borderColor: isLight ? '#f5c2c0' : 'rgba(255, 69, 58, 0.38)',
+    },
+    infoBannerText: {
+      flex: 1,
+      color: isLight ? '#5c3c00' : '#ffe082',
+      fontSize: fs.small,
+      fontWeight: '600',
+      marginRight: fs.spacing * 0.5,
+    },
+    infoBannerTextOffline: {
+      color: isLight ? '#8a1c1c' : '#ff8a80',
+    },
+    bannerButton: {
+      backgroundColor: theme.accent,
+      borderRadius: 8,
+      paddingVertical: fs.spacing * 0.375,
+      paddingHorizontal: fs.spacing * 0.625,
+      marginRight: fs.spacing * 0.5,
+    },
+    bannerButtonText: { color: theme.onAccent, fontSize: fs.small, fontWeight: '700' },
     bannerClose: { padding: fs.spacing * 0.25 },
-    bannerCloseText: { color: '#4a3000', fontSize: fs.base, fontWeight: '700' },
+    bannerCloseText: { color: theme.textSecondary, fontSize: fs.base, fontWeight: '700' },
     center: { alignItems: 'center', justifyContent: 'center', flex: 1 },
+    inlineStatusRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      marginBottom: fs.spacing * 0.5,
+    },
+    inlineStatusText: {
+      color: theme.textMuted,
+      fontSize: fs.small,
+      fontWeight: '500',
+    },
     skyIconWrap: { marginBottom: fs.spacing },
     loadingText: { color: theme.textMuted, marginTop: fs.spacing * 0.625, fontSize: fs.base },
     hint: { color: theme.textMuted, fontSize: fs.base, textAlign: 'center' },
@@ -2707,65 +1651,99 @@ const buildStyles = (theme, fs, insets) =>
     staleLabel: { fontSize: fs.small * 0.9, color: theme.textMuted, textAlign: 'center', marginTop: fs.spacing * 0.125, fontStyle: 'italic' },
     copiedHint: { fontSize: fs.small * 0.9, color: theme.textSecondary, textAlign: 'center', marginTop: fs.spacing * 0.125 },
     cityTime: { fontSize: fs.base, color: theme.textSecondary, textAlign: 'center', marginTop: fs.spacing * 0.25 },
-    bigIconWrap: { alignItems: 'center', marginTop: fs.spacing },
-    temperature: { fontSize: fs.large * 2.5, fontWeight: '300', color: theme.text, textAlign: 'center' },
-    condition: { fontSize: fs.base * 1.25, color: theme.textSecondary, textAlign: 'center', marginBottom: fs.spacing },
-    detailRow: { flexDirection: 'row', justifyContent: 'space-around', marginVertical: fs.spacing },
-    detailCard: { backgroundColor: theme.surface, borderRadius: 12, paddingVertical: fs.spacing * 0.875, paddingHorizontal: fs.spacing * 1.25, alignItems: 'center', minHeight: fs.cardHeight * 0.7 },
-    detailValue: { color: theme.text, fontSize: fs.base, fontWeight: '600' },
-    detailLabel: { color: theme.textMuted, fontSize: fs.small, marginTop: fs.spacing * 0.25 },
+    bigIconWrap: { alignItems: 'center', marginTop: fs.spacing * 0.85 },
+    temperature: { fontSize: fs.large * 2.5, fontWeight: '300', color: theme.text, textAlign: 'center', fontVariant: ['tabular-nums'] },
+    condition: { fontSize: fs.base * 1.2, color: theme.textSecondary, textAlign: 'center' },
+    feelsLikeText: { fontSize: fs.small, color: theme.textMuted, textAlign: 'center', marginTop: fs.spacing * 0.2 },
+    detailGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: fs.spacing * 0.625,
+      marginVertical: fs.spacing,
+    },
+    detailCard: {
+      flexGrow: 1,
+      flexBasis: '45%',
+      backgroundColor: theme.surface,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: theme.border,
+      paddingVertical: fs.spacing * 0.75,
+      paddingHorizontal: fs.spacing * 0.875,
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: fs.cardHeight * 0.7,
+    },
+    detailValue: { color: theme.text, fontSize: fs.base, fontWeight: '600', textAlign: 'center', fontVariant: ['tabular-nums'] },
+    detailLabel: { color: theme.textMuted, fontSize: fs.small, marginTop: fs.spacing * 0.2, textAlign: 'center' },
     sectionTitle: { fontSize: fs.base * 1.125, fontWeight: '600', color: theme.text, marginTop: fs.spacing * 0.625, marginBottom: fs.spacing * 0.5 },
-    forecastRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: theme.surfaceAlt, borderRadius: 8, paddingHorizontal: fs.spacing * 0.875, paddingVertical: fs.spacing * 0.625, marginBottom: fs.spacing * 0.375 },
-    forecastDay: { color: theme.textSecondary, fontSize: fs.base * 0.9375, flex: 1, textAlign: 'left' },
-    forecastIconCell: { width: 40, alignItems: 'center' },
-    forecastTemp: { color: theme.text, fontSize: fs.base * 0.9375, fontWeight: '600', width: 90, textAlign: 'right' },
+    forecastRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: theme.surfaceAlt,
+      borderRadius: 10,
+      paddingHorizontal: fs.spacing * 0.75,
+      paddingVertical: fs.spacing * 0.6,
+      marginBottom: fs.spacing * 0.375,
+      gap: fs.spacing * 0.45,
+    },
+    forecastDay: { color: theme.textSecondary, fontSize: fs.base * 0.92, width: fs.spacing * 4.6, flexShrink: 0, textAlign: 'left' },
+    forecastDayToday: { color: theme.text, fontWeight: '700' },
+    forecastIconCell: { width: 36, alignItems: 'center', justifyContent: 'center' },
+    forecastPrecip: { color: theme.accent, fontSize: Math.max(10, fs.small * 0.8), fontWeight: '700', marginTop: -2 },
+    forecastTempMin: {
+      color: theme.textSecondary,
+      fontSize: fs.base * 0.9,
+      fontWeight: '600',
+      minWidth: 34,
+      textAlign: 'right',
+      fontVariant: ['tabular-nums'],
+    },
+    forecastTempMax: {
+      color: theme.text,
+      fontSize: fs.base * 0.92,
+      fontWeight: '700',
+      minWidth: 34,
+      textAlign: 'right',
+      fontVariant: ['tabular-nums'],
+    },
+    rangeBarWrap: {
+      flex: 1,
+      height: 12,
+      justifyContent: 'center',
+      position: 'relative',
+      minWidth: 44,
+    },
+    rangeBarTrack: {
+      width: '100%',
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: theme.border,
+      overflow: 'hidden',
+      position: 'relative',
+    },
+    rangeBarFill: {
+      position: 'absolute',
+      top: 0,
+      bottom: 0,
+      borderRadius: 3,
+    },
+    rangeCurrentDot: {
+      position: 'absolute',
+      top: 1,
+      width: 10,
+      height: 10,
+      borderRadius: 5,
+      marginLeft: -5,
+      backgroundColor: '#ffffff',
+      borderWidth: 2,
+      borderColor: theme.surfaceAlt,
+      elevation: 2,
+    },
     hourlyRow: { gap: fs.spacing * 0.5, paddingBottom: fs.spacing * 0.25 },
-    hourlyCard: { backgroundColor: theme.surfaceAlt, borderRadius: 10, paddingHorizontal: fs.spacing * 0.625, paddingVertical: fs.spacing * 0.5, alignItems: 'center', gap: fs.spacing * 0.25, minWidth: fs.spacing * 3.75 },
-    hourlyTime: { color: theme.textSecondary, fontSize: fs.small * 0.95 },
-    hourlyTemp: { color: theme.text, fontSize: fs.base * 0.9375, fontWeight: '600' },
-    settingsLayer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100 },
-    settingsDim: { ...StyleSheet.absoluteFillObject, backgroundColor: theme.dim },
-    settingsScreen: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: theme.background },
-    settingsSafe: { flex: 1 },
-    settingsHeader: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: fs.spacing, paddingTop: insets.top + fs.spacing * 0.5, paddingBottom: fs.spacing * 0.75, borderBottomWidth: 1, borderBottomColor: theme.border },
-    settingsBackButton: { width: fs.spacing * 2.5, height: fs.spacing * 2.5, borderRadius: 12, backgroundColor: theme.surfaceRaised, alignItems: 'center', justifyContent: 'center', marginRight: fs.spacing * 0.625 },
-    settingsBackIcon: { fontSize: fs.base * 1.375, color: theme.textSecondary },
-    settingsHeaderTitle: { fontSize: fs.large * 1.15, fontWeight: '700', color: theme.text },
-    settingsBody: { flex: 1 },
-    settingsBodyContent: { paddingHorizontal: fs.spacing * 1.25, paddingTop: fs.spacing * 0.5, paddingBottom: fs.spacing * 2.125 },
-    settingsHero: { alignItems: 'center', paddingTop: fs.spacing * 0.875, paddingBottom: fs.spacing * 0.5, marginBottom: fs.spacing },
-    heroAppIcon: { width: fs.iconSize * 3.8, height: fs.iconSize * 3.8, borderRadius: 26, backgroundColor: '#FFFFFF', borderWidth: 0, marginBottom: fs.spacing * 0.75, alignItems: 'center', justifyContent: 'center', padding: fs.spacing },
-    heroTitle: { fontSize: fs.large * 1.15, fontWeight: '700', color: theme.text },
-    heroAuthor: { fontSize: fs.small, color: theme.textMuted, marginTop: fs.spacing * 0.25 },
-    heroVersion: { fontSize: fs.small * 0.846, color: theme.textMuted, marginTop: fs.spacing * 0.125 },
-    settingsSectionTitle: { fontSize: fs.small, fontWeight: '700', color: theme.textMuted, letterSpacing: 0.8, marginBottom: fs.spacing * 0.625, marginTop: fs.spacing * 1.375 },
-    cardStack: { gap: fs.spacing * 0.625 },
-    aboutCard: { flexDirection: 'row', alignItems: 'flex-start', backgroundColor: theme.surface, borderRadius: 16, paddingHorizontal: fs.spacing, paddingVertical: fs.spacing * 0.875, minHeight: 70 * fs.fontScale },
-    aboutCardTextWrap: { flex: 1, marginRight: fs.spacing * 0.5, minWidth: 0 },
-    aboutCardTitle: { fontSize: fs.base, fontWeight: '600', color: theme.text },
-    aboutCardDesc: { fontSize: fs.small, color: theme.textMuted, marginTop: fs.spacing * 0.125, lineHeight: fs.small * 1.3 },
-    interfaceIconWrap: {
-      width: fs.spacing * 2.625, height: fs.spacing * 2.625, borderRadius: 12,
-      backgroundColor: theme.background,
-      alignItems: 'center', justifyContent: 'center',
-      marginRight: fs.spacing * 0.75,
-    },
-    interfaceIconEmoji: { fontSize: fs.iconSize * 0.77 },
-    githubIconWrap: {
-      width: fs.spacing * 2.625, height: fs.spacing * 2.625, borderRadius: 12,
-      backgroundColor: theme.background,
-      alignItems: 'center', justifyContent: 'center',
-      marginRight: fs.spacing * 0.75,
-    },
-    settingsChevron: { fontSize: fs.base * 1.5, color: theme.textMuted, marginLeft: 'auto', flexShrink: 0 },
-    pickerLayer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20, alignItems: 'center', justifyContent: 'center', paddingHorizontal: fs.spacing * 1.5 },
-    pickerBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0, 0, 0, 0.45)' },
-    pickerCard: { width: '100%', maxWidth: 360, backgroundColor: theme.surface, borderRadius: 20, borderWidth: 1, borderColor: theme.border, padding: fs.spacing * 1.125 },
-    pickerTitle: { fontSize: fs.large * 1.15, fontWeight: '700', color: theme.text, marginBottom: fs.spacing * 0.75 },
-    pickerOption: { flexDirection: 'row', alignItems: 'center', paddingVertical: fs.spacing * 0.6875 },
-    radioOuter: { width: fs.spacing * 1.375, height: fs.spacing * 1.375, borderRadius: fs.spacing * 0.6875, borderWidth: 2, borderColor: theme.border, alignItems: 'center', justifyContent: 'center', marginRight: fs.spacing * 0.75 },
-    radioInner: { width: fs.spacing * 0.625, height: fs.spacing * 0.625, borderRadius: fs.spacing * 0.3125 },
-    pickerOptionTextWrap: { flex: 1 },
-    pickerOptionLabel: { fontSize: fs.base, fontWeight: '600', color: theme.text },
-    pickerOptionDesc: { fontSize: fs.small, color: theme.textMuted, marginTop: fs.spacing * 0.125 },
+    hourlyCard: { backgroundColor: theme.surfaceAlt, borderRadius: 12, paddingHorizontal: fs.spacing * 0.625, paddingVertical: fs.spacing * 0.5, alignItems: 'center', gap: fs.spacing * 0.2, minWidth: fs.spacing * 3.75 },
+    hourlyTime: { color: theme.textSecondary, fontSize: fs.small * 0.92, fontVariant: ['tabular-nums'] },
+    hourlyTemp: { color: theme.text, fontSize: fs.base * 0.92, fontWeight: '600', fontVariant: ['tabular-nums'] },
+    hourlyPrecip: { color: theme.accent, fontSize: Math.max(10, fs.small * 0.82), fontWeight: '700' },
   });
+};

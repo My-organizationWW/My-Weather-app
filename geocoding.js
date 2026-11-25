@@ -4,6 +4,7 @@
 export const OFFLINE_RE = /unknownhost|resolve host|no address|network request failed|fetch failed|timed out|timeout|abort|econn|enotfound|no internet/i;
 export function isOfflineError(e) {
   if (!e) return false;
+  if (e.isExternalAbort) return false;
   if (e.kind === 'network') return true;
   return OFFLINE_RE.test(String(e.message || e));
 }
@@ -17,24 +18,23 @@ import * as Location from 'expo-location';
 //
 // Chain (first hit wins):
 //  1. Platform reverse-geocoder (expo-location, free, no key) — best
-//     local coverage, e.g. Russian districts Open-Meteo never heard of.
-//  2. Open-Meteo reverse — consistent with the search DB, but has gaps:
-//     rural areas return HTTP 200 with {error:true, reason:"Not Found"}.
-//  3. BigDataCloud reverse (free, no key).
-//  4. Nominatim reverse (same host as the search fallback).
-// fetchFn is injected by the caller, same pattern as geocodeCity().
-// Never-hang guards: the platform geocoder (Google Play Services on
-// Android) can stall indefinitely when the network is broken instead of
-// rejecting — without caps a dead network turns geolocation into an
-// infinite hang rather than a fast fallback.
-const REVERSE_STEP_MS = 8000;
-const REVERSE_TOTAL_MS = 12000;
+//     local coverage, capped tightly at 2.5s so a stalled Google Play
+//     Services geocoder never freezes location loading.
+//  2. BigDataCloud reverse (free, no key, fast ~300ms).
+//  3. Nominatim reverse (same host as the search fallback).
+// Note: Open-Meteo's `/v1/reverse` endpoint does not exist (HTTP 404),
+// so it is intentionally skipped instead of burning a roundtrip.
+const REVERSE_STEP_MS = 2500;
+const REVERSE_TOTAL_MS = 5500;
 
 function withTimeout(promise, ms) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('reverse timeout')), ms)),
-  ]);
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('reverse timeout')), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    clearTimeout(timer);
+  });
 }
 
 export async function resolvePlaceName(latitude, longitude, lang, fetchFn) {
@@ -50,22 +50,14 @@ export async function resolvePlaceName(latitude, longitude, lang, fetchFn) {
     } catch (e) {}
     try {
       const data = await fetchFn(
-        `https://geocoding-api.open-meteo.com/v1/reverse?latitude=${latitude}&longitude=${longitude}&count=1&language=${lang || 'ru'}&format=json`
-      );
-      const p = data?.results?.length > 0 ? data.results[0] : null;
-      const name = p?.name || p?.admin1;
-      if (name) return { name, country: p?.country || '' };
-    } catch (e) {}
-    try {
-      const data = await fetchFn(
         `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=${lang || 'ru'}`
       );
       const name = data?.city || data?.locality || data?.principalSubdivision;
       if (name) return { name, country: data?.countryName || '' };
-    } catch (e) {}
+    } catch (e) {
+      if (e?.isExternalAbort) throw e;
+    }
     try {
-      // Nominatim reverse: same host as the search fallback, reachable
-      // everywhere the search is (proven by diagnostics on all networks).
       const data = await fetchFn(
         `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&addressdetails=1&accept-language=${lang || 'ru'}`
       );
@@ -74,15 +66,15 @@ export async function resolvePlaceName(latitude, longitude, lang, fetchFn) {
         addr.city || addr.town || addr.village || addr.hamlet || addr.municipality ||
         addr.suburb || addr.county || addr.state;
       if (name) return { name, country: addr.country || '' };
-    } catch (e) {}
+    } catch (e) {
+      if (e?.isExternalAbort) throw e;
+    }
     return null;
   })();
-  // Total cap: whatever stalls inside, callers get null after 12s and
-  // apply their own fallback (the orphaned chain only computes a value
-  // nobody reads — it never touches state).
   try {
     return await withTimeout(chain, REVERSE_TOTAL_MS);
   } catch (e) {
+    if (e?.isExternalAbort) throw e;
     return null;
   }
 }
