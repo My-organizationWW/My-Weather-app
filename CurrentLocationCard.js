@@ -2,7 +2,6 @@ import React, { useMemo } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import Svg, { Defs, RadialGradient, Stop, Rect } from 'react-native-svg';
 import { getWeatherTheme } from './DraggableCityCard';
 import PressableScale from './components/PressableScale';
 
@@ -150,24 +149,13 @@ const CurrentLocationCard = React.memo(function CurrentLocationCard({ item, them
             end={{ x: 1, y: 1 }}
             style={StyleSheet.absoluteFill}
           />
-          <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
-            <Defs>
-              <RadialGradient
-                id="current-location-glow"
-                cx="82%"
-                cy="35%"
-                rx="55%"
-                ry="65%"
-                fx="82%"
-                fy="35%"
-              >
-                <Stop offset="0%" stopColor="#ffffff" stopOpacity={0.16} />
-                <Stop offset="55%" stopColor="#ffffff" stopOpacity={0.05} />
-                <Stop offset="100%" stopColor="#ffffff" stopOpacity={0} />
-              </RadialGradient>
-            </Defs>
-            <Rect x="0" y="0" width="100%" height="100%" fill="url(#current-location-glow)" />
-          </Svg>
+          <LinearGradient
+            colors={['rgba(255,255,255,0.14)', 'rgba(255,255,255,0.03)', 'rgba(255,255,255,0)']}
+            start={{ x: 0.9, y: 0.1 }}
+            end={{ x: 0.2, y: 0.9 }}
+            style={StyleSheet.absoluteFill}
+            pointerEvents="none"
+          />
           <View style={styles.cardBody}>
             <View style={styles.pinWrap}>
               <Ionicons name="location-sharp" size={22} color="#FFFFFF" />

@@ -40,6 +40,7 @@ import { isOfflineError, isRegionLike, resolvePlaceName } from './geocoding';
 import { fetchForecast, searchCity } from './utils/weatherProviders';
 import { fetchJsonWithRetry, HttpError, isExternalAbortError } from './utils/http';
 import { acquireCurrentPosition } from './utils/locationHelper';
+import { preloadCityListCache } from './CityListScreen';
 import { WeatherIcon, SunAnimation, FogAnimation } from './components/weather/WeatherIcons';
 import {
   weathercodeToType,
@@ -259,11 +260,17 @@ export default function App() {
     return { seq, signal: controller.signal };
   }, []);
 
-  useEffect(() => () => {
-    requestSeqRef.current += 1;
-    if (abortControllerRef.current) {
-      try { abortControllerRef.current.abort(); } catch (e) {}
-    }
+  useEffect(() => {
+    const t = setTimeout(() => {
+      preloadCityListCache();
+    }, 1200);
+    return () => {
+      clearTimeout(t);
+      requestSeqRef.current += 1;
+      if (abortControllerRef.current) {
+        try { abortControllerRef.current.abort(); } catch (e) {}
+      }
+    };
   }, []);
 
   const toggleMenu = useCallback(() => {

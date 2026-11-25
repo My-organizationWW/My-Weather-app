@@ -15,7 +15,6 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import Svg, { Defs, RadialGradient, Stop, Rect } from 'react-native-svg';
 import FadeSlideIn from './components/FadeSlideIn';
 import { saveDragTrace } from './utils/dragTrace';
 import { convertTemp } from './utils/weatherFormat';
@@ -57,56 +56,18 @@ const LANDING = { duration: 180, easing: Easing.out(Easing.quad) };
 // and checkbox closely together (~8px gap).
 // Open width = handle (4+22+4=30) + 4 gap + checkbox 24 + 15 gap = 73.
 const CONTROLS_WIDTH = 73;
-// Same curve/timing on the card controls and on the search row in
-// CityListScreen so the whole transition reads as a single motion.
-const SELECTION_TIMING = {
-  duration: 260,
-  easing: Easing.bezier(0.22, 1, 0.36, 1),
-};
 
-const DraggableCityCard = React.memo(function DraggableCityCard({
-  item,
-  index,
-  isSelectionMode,
-  isSelected,
-  theme,
-  fs,
-  t,
-  tempUnit = 'C',
-  onSelectToggle,
-  onLongPressCity,
-  dragOffset,
-  activeIndex,
-  activeId,
-  beginDrag,
-  endDrag,
-  commitReorder,
-  itemCount,
-  trace,
-  released,
-  order,
-}) {
-  const safeItem = { ...item, isNight: item?.isNight ?? false };
-  // Stable per-instance identity for the active branch (see below).
-  const itemId = safeItem.id ?? String(index);
-  // 0..1 "lifted in hand" amount: scale, opacity, shadow, layer.
-  // All positional movement lives on the FlatList cell (see DragCell in
-  // CityListScreen), so the card itself never needs a translate.
-  const lift = useSharedValue(0);
-  // 0 = normal card, 1 = selection mode controls fully open.
-  const selectionProgress = useSharedValue(isSelectionMode ? 1 : 0);
-  useEffect(() => {
-    selectionProgress.value = withTiming(
-      isSelectionMode ? 1 : 0,
-      SELECTION_TIMING,
-    );
-  }, [isSelectionMode]);
+// Module-level style cache keyed by font metrics: avoids creating 12+ identical
+// StyleSheets on every CityList mount and lets StaticCityCardPreview match
+// DraggableCityCard pixel-for-pixel.
+let _cardStylesKey = '';
+let _cardStylesCache = null;
 
-  const weatherTheme = getWeatherTheme(safeItem.weathercode, safeItem.isNight);
-  const subText = 'rgba(255, 255, 255, 0.75)';
-  const minMaxColor = 'rgba(255, 255, 255, 0.7)';
-
-  const styles = useMemo(() => StyleSheet.create({
+function getCardStyles(fs) {
+  const key = `${fs.spacing}:${fs.large}:${fs.base}:${fs.small}:${fs.cardHeight}`;
+  if (_cardStylesKey === key && _cardStylesCache) return _cardStylesCache;
+  _cardStylesKey = key;
+  _cardStylesCache = StyleSheet.create({
     cardContainer: {
       borderRadius: 28,
       overflow: 'hidden',
@@ -198,27 +159,147 @@ const DraggableCityCard = React.memo(function DraggableCityCard({
       borderWidth: 2,
       alignItems: 'center',
       justifyContent: 'center',
-      // Breathing room between the circle and the city name. Lives inside the
-      // animated box (see CONTROLS_WIDTH), so it appears with the controls.
       marginRight: 15,
     },
     controlsWrap: {
-      overflow: 'hidden',
+      position: 'absolute',
+      left: 8,
+      top: 0,
+      bottom: 0,
+      justifyContent: 'center',
+      zIndex: 2,
     },
     controlsRow: {
       width: CONTROLS_WIDTH,
       flexDirection: 'row',
       alignItems: 'center',
     },
+    cardLeftSelected: {
+      paddingRight: CONTROLS_WIDTH - 4,
+    },
     dragHandle: {
       paddingHorizontal: 4,
       paddingVertical: 8,
-      // Tighter cluster: handle and circle read as one control (~8px gap).
       marginRight: 4,
       alignItems: 'center',
       justifyContent: 'center',
     },
-  }), [theme, fs]);
+  });
+  return _cardStylesCache;
+}
+
+// Ultra-lightweight pixel-identical card used ONLY during the 380ms
+// slide_from_right push transition (zero Reanimated worklets, zero RNGH
+// gesture handlers, zero icon animations) so cards slide in immediately on
+// frame 0 without dropping transition frames.
+export const StaticCityCardPreview = React.memo(function StaticCityCardPreview({
+  item,
+  fs,
+  t,
+  tempUnit = 'C',
+}) {
+  const safeItem = { ...item, isNight: item?.isNight ?? false };
+  const weatherTheme = getWeatherTheme(safeItem.weathercode, safeItem.isNight);
+  const styles = getCardStyles(fs);
+  return (
+    <View style={styles.cardContainer}>
+      <View style={styles.cardBackground}>
+        <LinearGradient
+          colors={weatherTheme.colors}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+        <LinearGradient
+          colors={['rgba(255,255,255,0.14)', 'rgba(255,255,255,0.03)', 'rgba(255,255,255,0)']}
+          start={{ x: 0.9, y: 0.1 }}
+          end={{ x: 0.2, y: 0.9 }}
+          style={StyleSheet.absoluteFill}
+          pointerEvents="none"
+        />
+        <View style={styles.cardBody}>
+          <View style={styles.cardLeft}>
+            <Text
+              style={styles.cityName}
+              numberOfLines={1}
+              ellipsizeMode="tail"
+              adjustsFontSizeToFit
+              minimumFontScale={0.65}
+            >
+              {safeItem.name}
+            </Text>
+            <View style={styles.conditionRow}>
+              <StaticWeatherConditionIcon
+                code={safeItem.weathercode}
+                isNight={safeItem.isNight}
+              />
+              <Text style={styles.cityCondition} numberOfLines={1} ellipsizeMode="tail">
+                {safeItem.condition || t('condition.cloudy')}
+              </Text>
+            </View>
+          </View>
+          <View style={styles.cardRight}>
+            <View style={styles.tempRow}>
+              <Text style={styles.cityTemp}>{displayCardTemp(safeItem, tempUnit)}</Text>
+              <Text style={styles.tempDegree}>°</Text>
+            </View>
+            <Text style={styles.cityMinMax}>{displayCardMinMax(safeItem, tempUnit)}</Text>
+          </View>
+        </View>
+      </View>
+    </View>
+  );
+});
+// Same curve/timing on the card controls and on the search row in
+// CityListScreen so the whole transition reads as a single motion.
+const SELECTION_TIMING = {
+  duration: 260,
+  easing: Easing.bezier(0.22, 1, 0.36, 1),
+};
+
+const DraggableCityCard = React.memo(function DraggableCityCard({
+  item,
+  index,
+  isSelectionMode,
+  isSelected,
+  theme,
+  fs,
+  t,
+  tempUnit = 'C',
+  onSelectToggle,
+  onLongPressCity,
+  dragOffset,
+  activeIndex,
+  activeId,
+  beginDrag,
+  endDrag,
+  commitReorder,
+  itemCount,
+  trace,
+  released,
+  order,
+}) {
+  const safeItem = { ...item, isNight: item?.isNight ?? false };
+  // Stable per-instance identity for the active branch (see below).
+  const itemId = safeItem.id ?? String(index);
+  // 0..1 "lifted in hand" amount: scale, opacity, shadow, layer.
+  // All positional movement lives on the FlatList cell (see DragCell in
+  // CityListScreen), so the card itself never needs a translate.
+  const lift = useSharedValue(0);
+  // 0 = normal card, 1 = selection mode controls fully open.
+  const selectionProgress = useSharedValue(isSelectionMode ? 1 : 0);
+  useEffect(() => {
+    selectionProgress.value = withTiming(
+      isSelectionMode ? 1 : 0,
+      SELECTION_TIMING,
+    );
+  }, [isSelectionMode]);
+
+  const weatherTheme = getWeatherTheme(safeItem.weathercode, safeItem.isNight);
+  const subText = 'rgba(255, 255, 255, 0.75)';
+  const minMaxColor = 'rgba(255, 255, 255, 0.7)';
+
+  const styles = getCardStyles(fs);
 
   // Real slot height: exact card height + bottom margin (matches styles above).
   const cardH = Math.round(fs.cardHeight * 1.375);
@@ -318,25 +399,23 @@ const DraggableCityCard = React.memo(function DraggableCityCard({
 
   const canSelectItem = isSelectionMode;
 
-  // Outer wrapper: collapsing/expanding width. In selection mode, it pulls
-  // 8px left so the drag handle sits compactly inside the card without
-  // compromising normal mode's comfortable text padding.
-  const controlsWrapStyle = useAnimatedStyle(() => {
-    const p = selectionProgress.value;
-    return {
-      width: CONTROLS_WIDTH * p,
-      marginLeft: -8 * p,
-    };
-  });
-  // Inner fixed-width row: slides in from the left while fading/scaling in.
+  // 100% GPU-only selection animation (zero Yoga width/marginLeft relayouts
+  // across 12 cards per frame): controls fade/slide in from an absolute overlay
+  // while the city text block shifts right via pure translateX.
   const controlsInnerStyle = useAnimatedStyle(() => {
     const p = selectionProgress.value;
     return {
       opacity: p,
       transform: [
-        { translateX: -12 * (1 - p) },
+        { translateX: -14 * (1 - p) },
         { scale: 0.85 + 0.15 * p },
       ],
+    };
+  });
+  const cardLeftAnimStyle = useAnimatedStyle(() => {
+    const p = selectionProgress.value;
+    return {
+      transform: [{ translateX: (CONTROLS_WIDTH - 8) * p }],
     };
   });
 
@@ -356,27 +435,16 @@ const DraggableCityCard = React.memo(function DraggableCityCard({
           end={{ x: 1, y: 1 }}
           style={StyleSheet.absoluteFill}
         />
-        <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
-          <Defs>
-            <RadialGradient
-              id={`glow-${itemId}`}
-              cx="82%"
-              cy="35%"
-              rx="55%"
-              ry="65%"
-              fx="82%"
-              fy="35%"
-            >
-              <Stop offset="0%" stopColor="#ffffff" stopOpacity={0.16} />
-              <Stop offset="55%" stopColor="#ffffff" stopOpacity={0.05} />
-              <Stop offset="100%" stopColor="#ffffff" stopOpacity={0} />
-            </RadialGradient>
-          </Defs>
-          <Rect x="0" y="0" width="100%" height="100%" fill={`url(#glow-${itemId})`} />
-        </Svg>
+        <LinearGradient
+          colors={['rgba(255,255,255,0.14)', 'rgba(255,255,255,0.03)', 'rgba(255,255,255,0)']}
+          start={{ x: 0.9, y: 0.1 }}
+          end={{ x: 0.2, y: 0.9 }}
+          style={StyleSheet.absoluteFill}
+          pointerEvents="none"
+        />
         <View style={styles.cardBody}>
-          <Animated.View
-            style={[styles.controlsWrap, controlsWrapStyle]}
+          <View
+            style={styles.controlsWrap}
             pointerEvents={canSelectItem ? 'auto' : 'none'}
           >
             <Animated.View style={[styles.controlsRow, controlsInnerStyle]}>
@@ -401,8 +469,8 @@ const DraggableCityCard = React.memo(function DraggableCityCard({
                 )}
               </Pressable>
             </Animated.View>
-          </Animated.View>
-          <View style={styles.cardLeft}>
+          </View>
+          <Animated.View style={[styles.cardLeft, canSelectItem && styles.cardLeftSelected, cardLeftAnimStyle]}>
             <Text
               style={styles.cityName}
               numberOfLines={1}
@@ -421,7 +489,7 @@ const DraggableCityCard = React.memo(function DraggableCityCard({
                 {safeItem.condition || t('condition.cloudy')}
               </Text>
             </View>
-          </View>
+          </Animated.View>
           <View style={styles.cardRight}>
             <View style={styles.tempRow}>
               <Text style={styles.cityTemp}>{displayCardTemp(safeItem, tempUnit)}</Text>
@@ -619,6 +687,58 @@ function RainConditionIcon() {
         <RainStreak left={8} delay={185} />
         <RainStreak left={13} delay={370} />
       </View>
+    </View>
+  );
+}
+
+function StaticWeatherConditionIcon({ code, isNight }) {
+  const c = code ?? 2;
+  if (c === 0) {
+    return (
+      <View style={iconStyles.iconBox}>
+        <Ionicons name={isNight ? 'moon' : 'sunny'} size={16} color={isNight ? '#fbbf24' : '#fde047'} />
+      </View>
+    );
+  }
+  if (c <= 3) {
+    return (
+      <View style={iconStyles.cloudWithSunMoon}>
+        <View style={[iconStyles.iconBox, iconStyles.sunMoonBack]}>
+          <Ionicons name={isNight ? 'moon' : 'sunny'} size={12} color="#fbbf24" />
+        </View>
+        <Ionicons name="cloud" size={14} color="#FFFFFF" style={iconStyles.cloudFront} />
+      </View>
+    );
+  }
+  if (c <= 48) {
+    return (
+      <View style={iconStyles.iconBox}>
+        <Ionicons name="cloudy" size={16} color="#94a3b8" />
+      </View>
+    );
+  }
+  if (c <= 67 || (c >= 80 && c <= 82)) {
+    return (
+      <View style={iconStyles.rainWithDrops}>
+        <Ionicons name="cloud" size={14} color="#FFFFFF" style={iconStyles.rainCloud} />
+        <View style={iconStyles.rainFallArea}>
+          <View style={[iconStyles.rainStreak, { left: 3, transform: [{ translateY: 1 }, { rotate: '10deg' }] }]} />
+          <View style={[iconStyles.rainStreak, { left: 8, transform: [{ translateY: 2.5 }, { rotate: '10deg' }] }]} />
+          <View style={[iconStyles.rainStreak, { left: 13, transform: [{ translateY: 1.5 }, { rotate: '10deg' }] }]} />
+        </View>
+      </View>
+    );
+  }
+  if (c <= 77 || (c >= 85 && c <= 86)) {
+    return (
+      <View style={iconStyles.iconBox}>
+        <Ionicons name="snow" size={16} color="#f0f9ff" />
+      </View>
+    );
+  }
+  return (
+    <View style={iconStyles.iconBox}>
+      <Ionicons name="thunderstorm" size={16} color="#facc15" />
     </View>
   );
 }

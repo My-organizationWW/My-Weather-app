@@ -17,7 +17,7 @@ import { fetchForecast, searchCity } from './utils/weatherProviders';
 import { fetchJsonWithRetry, isExternalAbortError } from './utils/http';
 import { acquireCurrentPosition } from './utils/locationHelper';
 import ConfirmDeleteModal from './ConfirmDeleteModal';
-import DraggableCityCard from './DraggableCityCard';
+import DraggableCityCard, { StaticCityCardPreview } from './DraggableCityCard';
 import CurrentLocationCard from './CurrentLocationCard';
 import PressableScale from './components/PressableScale';
 import FadeSlideIn from './components/FadeSlideIn';
@@ -28,6 +28,46 @@ const LAST_SELECTED_CITY_KEY = 'last_selected_city';
 const CONFIRM_DELETE_KEY = 'confirm_delete_enabled';
 const BASE_URL = 'https://api.open-meteo.com/v1/forecast';
 const FETCH_TIMEOUT_MS = 15000;
+
+// In-memory cache so CityList renders cached cards immediately on frame 0
+// (sliding in together with the screen, zero blank pause), while heavy
+// network/GPS/storage refreshes still wait for `transitionEnd`.
+let cachedCities = null;
+let cachedCurrentLocation = null;
+let cachedConfirmDelete = true;
+let cachedLocationSectionHeight = 0;
+
+export async function preloadCityListCache() {
+  if (cachedCities !== null) return;
+  try {
+    const pairs = await AsyncStorage.multiGet([SAVED_CITIES_KEY, CONFIRM_DELETE_KEY]);
+    const map = Object.fromEntries(pairs);
+    if (map[CONFIRM_DELETE_KEY] !== null && map[CONFIRM_DELETE_KEY] !== undefined) {
+      cachedConfirmDelete = map[CONFIRM_DELETE_KEY] === 'true';
+    }
+    if (map[SAVED_CITIES_KEY]) {
+      const parsed = JSON.parse(map[SAVED_CITIES_KEY]);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const seenNames = new Set();
+        const seenIds = new Set();
+        cachedCities = parsed
+          .filter((c) => {
+            if (!c || !c.name) return false;
+            const norm = c.name.trim().toLowerCase();
+            if (seenNames.has(norm)) return false;
+            seenNames.add(norm);
+            return true;
+          })
+          .map((c, idx) => {
+            let id = String(c.id ?? `city_${idx}`);
+            if (seenIds.has(id)) id = `${id}_${idx}`;
+            seenIds.add(id);
+            return { ...c, id };
+          });
+      }
+    }
+  } catch (e) {}
+}
 
 function makeCityFetchJson(signal, timeoutMs = FETCH_TIMEOUT_MS, retries = 1) {
   return (url) => fetchJsonWithRetry(url, { timeoutMs, retries, signal });
@@ -76,6 +116,142 @@ function SkeletonCard({ theme, fs }) {
     </RNAnimated.View>
   );
 }
+
+// Smooth height + opacity + scale reveal for the "Current location" section.
+// Uses Reanimated shared values (no layout animations) so the saved-cities list
+// glides downward smoothly when GPS resolves instead of snapping in 1 frame.
+const LOCATION_REVEAL_TIMING = {
+  duration: 340,
+  easing: Easing.bezier(0.22, 1, 0.36, 1),
+};
+const LOCATION_HIDE_TIMING = {
+  duration: 240,
+  easing: Easing.inOut(Easing.quad),
+};
+
+const CurrentLocationReveal = React.memo(function CurrentLocationReveal({
+  currentLocation,
+  initialVisible,
+  styles,
+  t,
+  theme,
+  fs,
+  tempUnit,
+  onPress,
+}) {
+  const [renderedItem, setRenderedItem] = useState(() => currentLocation);
+  const [measuredHeight, setMeasuredHeight] = useState(() => (initialVisible ? cachedLocationSectionHeight : 0));
+  const isVisible = currentLocation !== null;
+  // Only animate when transitioning between null <-> present; when already
+  // visible on mount (e.g. from cache or preview -> FlatList swap), stay in
+  // normal document flow with zero layout recalculation or 1-frame collapse.
+  const [isAnimating, setIsAnimating] = useState(() => !initialVisible && isVisible);
+  const progress = useSharedValue(initialVisible ? 1 : 0);
+  const heightSV = useSharedValue(cachedLocationSectionHeight);
+  const animatingSV = useSharedValue(!initialVisible && isVisible ? 1 : 0);
+
+  useEffect(() => {
+    if (currentLocation) {
+      setRenderedItem(currentLocation);
+    }
+  }, [currentLocation]);
+
+  useEffect(() => {
+    if (isVisible) {
+      if (progress.value < 1) {
+        setIsAnimating(true);
+        animatingSV.value = 1;
+        if (measuredHeight > 0 || cachedLocationSectionHeight > 0) {
+          const targetH = measuredHeight || cachedLocationSectionHeight;
+          heightSV.value = targetH;
+          progress.value = withTiming(1, LOCATION_REVEAL_TIMING);
+          const doneTimer = setTimeout(() => {
+            animatingSV.value = 0;
+            setIsAnimating(false);
+          }, LOCATION_REVEAL_TIMING.duration + 30);
+          return () => clearTimeout(doneTimer);
+        }
+      }
+    } else if (renderedItem) {
+      setIsAnimating(true);
+      animatingSV.value = 1;
+      progress.value = withTiming(0, LOCATION_HIDE_TIMING);
+      const timer = setTimeout(() => {
+        setRenderedItem(null);
+        animatingSV.value = 0;
+        setIsAnimating(false);
+      }, LOCATION_HIDE_TIMING.duration + 30);
+      return () => clearTimeout(timer);
+    }
+  }, [isVisible, measuredHeight, renderedItem, progress, heightSV, animatingSV]);
+
+  const handleLayout = useCallback((e) => {
+    const h = Math.ceil(e.nativeEvent.layout.height);
+    if (h > 0) {
+      cachedLocationSectionHeight = h;
+      heightSV.value = h;
+      if (h !== measuredHeight) {
+        setMeasuredHeight(h);
+      }
+      if (isVisible && progress.value < 1) {
+        animatingSV.value = 1;
+        setIsAnimating(true);
+        progress.value = withTiming(1, LOCATION_REVEAL_TIMING);
+      }
+    }
+  }, [measuredHeight, heightSV, animatingSV, isVisible, progress]);
+
+  const outerStyle = useAnimatedStyle(() => {
+    if (animatingSV.value === 0) {
+      return {};
+    }
+    return {
+      height: heightSV.value * progress.value,
+      overflow: 'hidden',
+    };
+  });
+
+  const innerStyle = useAnimatedStyle(() => {
+    if (animatingSV.value === 0) {
+      return { opacity: 1, transform: [{ translateY: 0 }, { scale: 1 }] };
+    }
+    const p = progress.value;
+    return {
+      opacity: p,
+      transform: [
+        { translateY: -10 * (1 - p) },
+        { scale: 0.94 + 0.06 * p },
+      ],
+    };
+  });
+
+  if (!renderedItem) return null;
+
+  return (
+    <Animated.View style={outerStyle}>
+      <Animated.View
+        onLayout={handleLayout}
+        style={[
+          isAnimating ? { position: 'absolute', top: 0, left: 0, right: 0 } : null,
+          innerStyle,
+        ]}
+      >
+        <View style={[styles.sectionHeader, { paddingTop: 8 }]}>
+          <Text style={styles.sectionHeaderText}>{t('cities.current_location')}</Text>
+        </View>
+        <CurrentLocationCard
+          item={renderedItem}
+          theme={theme}
+          fs={fs}
+          t={t}
+          tempUnit={tempUnit}
+          style={{ marginBottom: fs.spacing * 0.6 }}
+          onPress={renderedItem.isCoordinateFallback ? undefined : onPress}
+        />
+      </Animated.View>
+    </Animated.View>
+  );
+});
 
 // FlatList wraps every row in its own cell. All movement is applied to the
 // CELL itself, not to the card inside it. This matters for touch handling:
@@ -172,23 +348,26 @@ export default function CityListScreen() {
 
   // Saved cities ONLY — the geolocation card lives in `currentLocation`
   // and is never part of this array (not draggable, selectable or deletable).
-  const [cities, setCities] = useState([]);
+  const [cities, setCities] = useState(() => cachedCities || []);
   // Device geolocation weather card. null = unavailable/denied -> no card at all.
-  const [currentLocation, setCurrentLocation] = useState(null);
+  const [currentLocation, setCurrentLocation] = useState(() => cachedCurrentLocation);
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  // The heavy native subtree (FlatList + Reanimated cards + gestures)
-  // mounts only after the push transition: its UI-thread inflation cost
-  // during the animation window starves both screens of frames, exposing
-  // the window background as a grey strip. First paint is header + search
-  // only — same weight class as the (smooth) Settings screen.
+  const hasInitialCacheRef = useRef(cachedCities !== null && cachedCities.length > 0);
+  // Keep the heavy FlatList + Reanimated/RNGH subtree unmounted until
+  // `transitionEnd`, while immediately showing pixel-identical lightweight
+  // StaticCityCardPreview cards on frame 0 so there is ZERO blank delay AND
+  // ZERO push-transition jank!
   const [listMounted, setListMounted] = useState(false);
-   const [isSelectionMode, setIsSelectionMode] = useState(false);
+  const listMountedRef = useRef(false);
+  listMountedRef.current = listMounted;
+  const didInitialSettleRef = useRef(false);
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [selectedCities, setSelectedCities] = useState(new Set());
   const [deleteTarget, setDeleteTarget] = useState(null);
   // Delete-confirmation switch from Settings (default ON).
-  const [confirmDelete, setConfirmDelete] = useState(true);
+  const [confirmDelete, setConfirmDelete] = useState(() => cachedConfirmDelete);
   // True while a drag gesture is active — FlatList scrolling is locked for
   // that time so the scroll view never fights the pan gesture (that fight
   // shows up as jitter of the whole list mid-drag).
@@ -241,9 +420,8 @@ export default function CityListScreen() {
     [order, activeId, activeIndex, dragOffset, cities.length, cardStride],
   );
 
-  // Search row collapse/expand. Animating its height (instead of unmounting
-  // it) prevents the one-frame overlap/jump that looked like flicker when
-  // entering or leaving selection mode.
+  // Search row collapse/expand — 100% GPU transform + opacity (zero per-frame
+  // height relayout of the FlatList container, keeping selection mode at 90fps).
   const searchRowHeight = Math.round(fs.spacing * 3.5 + 8);
   const searchRowProgress = useSharedValue(isSelectionMode ? 0 : 1);
   useEffect(() => {
@@ -253,8 +431,11 @@ export default function CityListScreen() {
     });
   }, [isSelectionMode]);
   const searchRowAnimStyle = useAnimatedStyle(() => ({
-    height: searchRowProgress.value * searchRowHeight,
     opacity: searchRowProgress.value,
+    transform: [{ translateY: -(1 - searchRowProgress.value) * (searchRowHeight * 0.45) }],
+  }));
+  const listShiftAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: -(1 - searchRowProgress.value) * searchRowHeight }],
   }));
 
   // Delete bar. It stays mounted for the whole screen lifetime and is only
@@ -367,6 +548,11 @@ export default function CityListScreen() {
       flexShrink: 1,
     },
     searchRow: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      zIndex: 5,
       flexDirection: 'row',
       paddingHorizontal: fs.spacing,
       paddingTop: fs.spacing * 0.5,
@@ -570,35 +756,59 @@ export default function CityListScreen() {
   }), [theme, fs, insets]);
 
   useEffect(() => {
-    // Deferred past the first frames so the push transition owns them
-    // (double requestAnimationFrame replaces the deprecated
-    // InteractionManager.runAfterInteractions — same effect, no warning).
-    // Storage read is fast, so the cached list paints almost instantly;
-    // network refresh lands in the background afterwards. Cancelled on
-    // unmount/language switch.
+    if (listMounted) {
+      cachedCities = cities;
+    }
+  }, [cities, listMounted]);
+
+  useEffect(() => {
+    if (listMounted) {
+      cachedCurrentLocation = currentLocation;
+    }
+  }, [currentLocation, listMounted]);
+
+  useEffect(() => {
+    // Wait for the native slide_from_right push transition to finish before
+    // inflating FlatList + Reanimated cards and kicking off storage/network/GPS
+    // work. Previously double-rAF fired at ~22ms mid-slide and swallowed the
+    // first ~90ms of the transition (causing an abrupt jump to ~25% width).
     let cancelled = false;
-    let raf1 = 0;
-    let raf2 = 0;
-    raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => {
-        if (cancelled) return;
-        setListMounted(true);
-        loadSavedCitiesAndRefresh();
-        loadCurrentLocation();
-        (async () => {
-          try {
-            const v = await AsyncStorage.getItem(CONFIRM_DELETE_KEY);
-            setConfirmDelete(v === null ? true : v === 'true');
-          } catch (e) {}
-        })();
-      });
+    let settled = false;
+    const settle = () => {
+      if (cancelled || settled) return;
+      settled = true;
+      didInitialSettleRef.current = true;
+      if (!listMountedRef.current) setListMounted(true);
+      loadSavedCitiesAndRefresh();
+      loadCurrentLocation();
+      (async () => {
+        try {
+          const v = await AsyncStorage.getItem(CONFIRM_DELETE_KEY);
+          if (cancelled) return;
+          const next = v === null ? true : v === 'true';
+          cachedConfirmDelete = next;
+          setConfirmDelete((prev) => (prev === next ? prev : next));
+        } catch (e) {}
+      })();
+    };
+
+    if (didInitialSettleRef.current) {
+      // Language switched while screen is already mounted: refresh right away.
+      settle();
+      return () => { cancelled = true; };
+    }
+
+    const unsubscribe = navigation.addListener('transitionEnd', (e) => {
+      if (!e?.data?.closing) settle();
     });
+    // Fallback if OS animations are disabled (transitionEnd may not fire).
+    const fallbackTimer = setTimeout(settle, 420);
     return () => {
       cancelled = true;
-      cancelAnimationFrame(raf1);
-      cancelAnimationFrame(raf2);
+      unsubscribe();
+      clearTimeout(fallbackTimer);
     };
-  }, [i18n.language]);
+  }, [i18n.language, navigation]);
 
   // Import happened in Settings (list replaced on disk): reload once on
   // return. Runs in the background over the visible cached list, so no
@@ -1036,31 +1246,29 @@ export default function CityListScreen() {
 
   const keyExtractor = useCallback((item, index) => String(item?.id ?? index), []);
 
+  const hasInitialLocationRef = useRef(cachedCurrentLocation !== null);
+  const handleSelectCurrentLocation = useCallback(() => {
+    if (!currentLocation || currentLocation.isCoordinateFallback) return;
+    handleSelectCity(currentLocation.name, currentLocation.latitude, currentLocation.longitude);
+  }, [currentLocation, handleSelectCity]);
+
   const listHeaderElement = useMemo(() => (
     <View>
-      {currentLocation ? (
-        <View>
-          <View style={[styles.sectionHeader, { paddingTop: 8 }]}>
-            <Text style={styles.sectionHeaderText}>{t('cities.current_location')}</Text>
-          </View>
-          <CurrentLocationCard
-            item={currentLocation}
-            theme={theme}
-            fs={fs}
-            t={t}
-            tempUnit={tempUnit}
-            style={{ marginBottom: fs.spacing * 0.6 }}
-            onPress={currentLocation.isCoordinateFallback
-              ? undefined
-              : () => handleSelectCity(currentLocation.name, currentLocation.latitude, currentLocation.longitude)}
-          />
-        </View>
-      ) : null}
+      <CurrentLocationReveal
+        currentLocation={currentLocation}
+        initialVisible={hasInitialLocationRef.current}
+        styles={styles}
+        t={t}
+        theme={theme}
+        fs={fs}
+        tempUnit={tempUnit}
+        onPress={handleSelectCurrentLocation}
+      />
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionHeaderText}>{t('cities.saved_cities')}</Text>
       </View>
     </View>
-  ), [currentLocation, styles, t, theme, fs, tempUnit, handleSelectCity]);
+  ), [currentLocation, styles, t, theme, fs, tempUnit, handleSelectCurrentLocation]);
 
   return (
     <ScreenWrapper contentStyle={{ paddingTop: Math.max(insets.top - 12, 0) }}>
@@ -1092,86 +1300,138 @@ export default function CityListScreen() {
         )}
       </View>
 
-      {/* Search / Add Bar (height collapses smoothly in selection mode) */}
-      <Animated.View
-        style={[styles.searchRow, searchRowAnimStyle]}
-        pointerEvents={isSelectionMode ? 'none' : 'auto'}
-      >
-        <TextInput
-          style={[styles.input, { backgroundColor: theme.surfaceRaised, color: theme.text, borderColor: theme.border }]}
-          placeholder={t('cities.add_placeholder')}
-          placeholderTextColor={theme.textMuted}
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          onSubmitEditing={handleAddCity}
-          editable={!isSelectionMode}
-        />
-        <PressableScale
-          style={[styles.addButton, { backgroundColor: theme.accent }]}
-          onPress={handleAddCity}
-          scaleTo={0.9}
-          haptic
+      <View style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+        {/* Search / Add Bar (slides/fades out on GPU in selection mode) */}
+        <Animated.View
+          style={[styles.searchRow, { height: searchRowHeight }, searchRowAnimStyle]}
+          pointerEvents={isSelectionMode ? 'none' : 'auto'}
         >
-          <Ionicons name="add" size={24} color={theme.onAccent || '#FFFFFF'} />
-        </PressableScale>
-      </Animated.View>
-
-      {!listMounted ? (
-        <View style={{ flex: 1 }} />
-      ) : isLoading && cities.length === 0 ? (
-        <View style={{ flex: 1, paddingHorizontal: fs.spacing, paddingTop: fs.spacing * 0.5 }}>
-          <SkeletonCard theme={theme} fs={fs} />
-          <SkeletonCard theme={theme} fs={fs} />
-          <SkeletonCard theme={theme} fs={fs} />
-        </View>
-      ) : (
-        <FadeSlideIn duration={260} distance={12} style={{ flex: 1 }}>
-          <DragCellContext.Provider value={dragCellValue}>
-          <FlatList
-            data={renderList}
-            keyExtractor={keyExtractor}
-            renderItem={renderItem}
-            CellRendererComponent={DragCell}
-            // Cards are placed by transforms; clipping by layout bounds
-            // could detach a card that is visually on screen.
-            removeClippedSubviews={false}
-            ListHeaderComponent={listHeaderElement}
-            ListEmptyComponent={
-              <Text style={styles.emptyListText}>{t('cities.empty_list')}</Text>
-            }
-            style={{ flex: 1 }}
-            scrollEnabled={!isDragging}
-            contentContainerStyle={[
-              styles.listContainer,
-              // Reserve the delete-bar space for the WHOLE selection session,
-              // not only after the first checkbox. Changing the content height
-              // at the same moment the search row collapses made the ScrollView
-              // re-clamp (visible jump) when the list was scrolled to the bottom.
-              isSelectionMode && { paddingBottom: 110 },
-            ]}
-            showsVerticalScrollIndicator={false}
-            // RefreshControl MUST stay mounted for the whole screen lifetime.
-            // On Android RN wraps the ScrollView in a SwipeRefreshLayout only
-            // when this prop is set; swapping element <-> undefined changes
-            // the root component type and remounts the native ScrollView and
-            // every cell (visible flash when entering/leaving selection
-            // mode). Keeping it mounted and disabling it avoids the remount.
-            refreshControl={
-              <RefreshControl
-                refreshing={refreshing}
-                enabled={!isSelectionMode}
-                onRefresh={() => {
-                  if (isSelectionMode) return;
-                  setRefreshing(true);
-                  loadSavedCitiesAndRefresh();
-                  loadCurrentLocation();
-                }}
-              />
-            }
+          <TextInput
+            style={[styles.input, { backgroundColor: theme.surfaceRaised, color: theme.text, borderColor: theme.border }]}
+            placeholder={t('cities.add_placeholder')}
+            placeholderTextColor={theme.textMuted}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            onSubmitEditing={handleAddCity}
+            editable={!isSelectionMode}
           />
-          </DragCellContext.Provider>
-        </FadeSlideIn>
-      )}
+          <PressableScale
+            style={[styles.addButton, { backgroundColor: theme.accent }]}
+            onPress={handleAddCity}
+            scaleTo={0.9}
+            haptic
+          >
+            <Ionicons name="add" size={24} color={theme.onAccent || '#FFFFFF'} />
+          </PressableScale>
+        </Animated.View>
+
+        <Animated.View style={[{ flex: 1, paddingTop: searchRowHeight, marginBottom: -searchRowHeight }, listShiftAnimStyle]}>
+          {!listMounted ? (
+            cities.length > 0 ? (
+              <View style={[styles.listContainer, { flex: 1, overflow: 'hidden' }]} pointerEvents="none">
+                {listHeaderElement}
+                {cities.slice(0, currentLocation ? 5 : 6).map((item) => (
+                  <StaticCityCardPreview
+                    key={item.id}
+                    item={item}
+                    fs={fs}
+                    t={t}
+                    tempUnit={tempUnit}
+                  />
+                ))}
+              </View>
+            ) : (
+              <View style={{ flex: 1 }} />
+            )
+          ) : isLoading && cities.length === 0 ? (
+            <View style={{ flex: 1, paddingHorizontal: fs.spacing, paddingTop: fs.spacing * 0.5 }}>
+              <SkeletonCard theme={theme} fs={fs} />
+              <SkeletonCard theme={theme} fs={fs} />
+              <SkeletonCard theme={theme} fs={fs} />
+            </View>
+          ) : (
+            (hasInitialCacheRef.current ? (
+              <View style={{ flex: 1 }}>
+                <DragCellContext.Provider value={dragCellValue}>
+                <FlatList
+                  data={renderList}
+                  keyExtractor={keyExtractor}
+                  renderItem={renderItem}
+                  CellRendererComponent={DragCell}
+                  initialNumToRender={12}
+                  maxToRenderPerBatch={8}
+                  windowSize={11}
+                  // Cards are placed by transforms; clipping by layout bounds
+                  // could detach a card that is visually on screen.
+                  removeClippedSubviews={false}
+                  ListHeaderComponent={listHeaderElement}
+                  ListEmptyComponent={
+                    <Text style={styles.emptyListText}>{t('cities.empty_list')}</Text>
+                  }
+                  style={{ flex: 1 }}
+                  scrollEnabled={!isDragging}
+                  contentContainerStyle={[
+                    styles.listContainer,
+                    { paddingBottom: (isSelectionMode ? 110 : fs.spacing * 1.75) + searchRowHeight },
+                  ]}
+                  showsVerticalScrollIndicator={false}
+                  refreshControl={
+                    <RefreshControl
+                      refreshing={refreshing}
+                      enabled={!isSelectionMode}
+                      onRefresh={() => {
+                        if (isSelectionMode) return;
+                        setRefreshing(true);
+                        loadSavedCitiesAndRefresh();
+                        loadCurrentLocation();
+                      }}
+                    />
+                  }
+                />
+                </DragCellContext.Provider>
+              </View>
+            ) : (
+              <FadeSlideIn duration={240} distance={10} style={{ flex: 1 }}>
+                <DragCellContext.Provider value={dragCellValue}>
+                <FlatList
+                  data={renderList}
+                  keyExtractor={keyExtractor}
+                  renderItem={renderItem}
+                  CellRendererComponent={DragCell}
+                  initialNumToRender={12}
+                  maxToRenderPerBatch={8}
+                  windowSize={11}
+                  removeClippedSubviews={false}
+                  ListHeaderComponent={listHeaderElement}
+                  ListEmptyComponent={
+                    <Text style={styles.emptyListText}>{t('cities.empty_list')}</Text>
+                  }
+                  style={{ flex: 1 }}
+                  scrollEnabled={!isDragging}
+                  contentContainerStyle={[
+                    styles.listContainer,
+                    { paddingBottom: (isSelectionMode ? 110 : fs.spacing * 1.75) + searchRowHeight },
+                  ]}
+                  showsVerticalScrollIndicator={false}
+                  refreshControl={
+                    <RefreshControl
+                      refreshing={refreshing}
+                      enabled={!isSelectionMode}
+                      onRefresh={() => {
+                        if (isSelectionMode) return;
+                        setRefreshing(true);
+                        loadSavedCitiesAndRefresh();
+                        loadCurrentLocation();
+                      }}
+                    />
+                  }
+                />
+                </DragCellContext.Provider>
+              </FadeSlideIn>
+            ))
+          )}
+        </Animated.View>
+      </View>
 
       {/* Persistent delete bar: mounted always, shown/hidden by shared value
           (opacity + slide). No mount/unmount layout animation => no flash. */}
