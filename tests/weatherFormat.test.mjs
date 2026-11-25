@@ -4,6 +4,8 @@ import {
   weathercodeToType,
   isNightHour,
   isCoordsLikeText,
+  formatCountryName,
+  formatLocationSubtitle,
   getHourlyTimeline,
   beaufortFromMs,
   convertWind,
@@ -205,4 +207,24 @@ test('extractCurrentExtras reads Open-Meteo current fields and degrades cleanly 
 
   const st = extractCurrentExtras({ current_weather: { temperature: 10, winddirection: 90 } });
   assert.deepEqual(st, { feelsLike: null, humidity: null, pressureHpa: null, windDirection: 90, precipProb: null });
+});
+
+test('formatCountryName shortens verbose country names and formatLocationSubtitle respects modes', () => {
+  assert.equal(formatCountryName('Соединенные Штаты Америки'), 'США');
+  assert.equal(formatCountryName('Соединённые Штаты Америки'), 'США');
+  assert.equal(formatCountryName('United States of America'), 'USA');
+  assert.equal(formatCountryName('Объединённые Арабские Эмираты'), 'ОАЭ');
+  assert.equal(formatCountryName('Российская Федерация'), 'Россия');
+  assert.equal(formatCountryName('55.75, 37.62'), '');
+
+  const ny = { name: 'Нью-Йорк', country: 'Соединенные Штаты Америки', latitude: 40.71, longitude: -74.01 };
+  assert.equal(formatLocationSubtitle(ny, 'both'), 'США · 40.71, -74.01');
+  assert.equal(formatLocationSubtitle(ny, 'country'), 'США');
+  assert.equal(formatLocationSubtitle(ny, 'coords'), '40.71, -74.01');
+  assert.equal(formatLocationSubtitle(ny, 'hidden'), null);
+
+  const noCountry = { name: 'Подосинки', country: '', latitude: 56.21, longitude: 37.55 };
+  assert.equal(formatLocationSubtitle(noCountry, 'both'), '56.21, 37.55');
+  assert.equal(formatLocationSubtitle(noCountry, 'country'), null);
+  assert.equal(formatLocationSubtitle(noCountry, 'coords'), '56.21, 37.55');
 });

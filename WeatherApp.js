@@ -46,6 +46,7 @@ import {
   weathercodeToType,
   isNightHour,
   isCoordsLikeText,
+  formatLocationSubtitle,
   getHourlyTimeline,
   beaufortFromMs,
   convertWind,
@@ -360,7 +361,7 @@ export default function App() {
   const navTsParam = route.params?.ts;
   const appliedCityParam = useRef(null);
   const { setLoading: setAppLoading } = useContext(LoadingContext);
-  const { tempUnit, windUnit, showSourceBadge } = useContext(SettingsContext);
+  const { tempUnit, windUnit, showSourceBadge, locationSubtitleMode } = useContext(SettingsContext);
 
   const refreshColors = useMemo(
     () => (theme.mode === 'light' ? ['#3573c2', '#25945a'] : ['#4a90d9', '#38b06b']),
@@ -537,6 +538,26 @@ export default function App() {
     );
   };
 
+  // Backfill missing country label (e.g. from saved cities / Phenomena / legacy
+  // cache) asynchronously without ever blocking or delaying the forecast render.
+  const enrichCountryInBackground = (place, data, savedAt, seq, signal) => {
+    if (!place || (place.country && !isCoordsLikeText(place.country))) return;
+    if (typeof place.latitude !== 'number' || typeof place.longitude !== 'number') return;
+    const revFetch = makeFetchJson(signal, 5000, 0);
+    resolvePlaceName(place.latitude, place.longitude, i18n.language || 'ru', revFetch)
+      .then((resolved) => {
+        if (seq !== requestSeqRef.current) return;
+        const country = resolved?.country;
+        if (!country || isCoordsLikeText(country)) return;
+        const enrichedPlace = { ...place, country };
+        const updated = { place: enrichedPlace, data, savedAt };
+        weatherRef.current = updated;
+        setWeather(updated);
+        saveCachedWeather({ place: enrichedPlace, data, query: enrichedPlace.name, savedAt });
+      })
+      .catch(() => {});
+  };
+
   // Load weather for an already-known place (from CityList / Phenomena)
   // without redundant geocoding.
   const loadKnownPlace = async (place, silent = false) => {
@@ -559,6 +580,7 @@ export default function App() {
         await saveLastCity(place.name);
       }
       setCity('');
+      enrichCountryInBackground(place, data, savedAt, seq, signal);
     } catch (e) {
       if (seq !== requestSeqRef.current || isExternalAbortError(e)) return;
       applyFetchError(e);
@@ -754,6 +776,7 @@ export default function App() {
       const q = lastRequest.current?.query ?? cur.place.name;
       lastRequest.current = { type: 'coords', lat: cur.place.latitude, lon: cur.place.longitude, query: q ?? null };
       await saveCachedWeather({ place: cur.place, data, query: q, savedAt });
+      enrichCountryInBackground(cur.place, data, savedAt, seq, signal);
       return true;
     } catch (e) {
       if (seq !== requestSeqRef.current || isExternalAbortError(e)) return false;
@@ -1194,22 +1217,23 @@ export default function App() {
                   {tr('cachedAt', { time: formatCacheTime(weather.savedAt) })}
                 </Text>
               )}
-              <Pressable onLongPress={copyCoords} delayLongPress={500} hitSlop={8}>
-                <Text style={styles.subLabel}>
-                  {(() => {
-                    const coordsLabel = `${weather.place.latitude.toFixed(2)}, ${weather.place.longitude.toFixed(2)}`;
-                    const norm = (s) => String(s || '').replace(/\s+/g, '');
-                    const showCountry =
-                      weather.place.country &&
-                      !isCoordsLikeText(weather.place.country) &&
-                      norm(weather.place.country) !== norm(coordsLabel);
-                    return `${showCountry ? `${weather.place.country} · ` : ''}${coordsLabel}`;
-                  })()}
-                </Text>
-                {coordsCopied && Platform.OS !== 'android' && (
-                  <Text style={styles.copiedHint}>{tr('coordsCopied')}</Text>
-                )}
-              </Pressable>
+              {(() => {
+                const subtitle = formatLocationSubtitle(weather.place, locationSubtitleMode);
+                if (!subtitle) return null;
+                const canCopyCoords = locationSubtitleMode !== 'country';
+                return (
+                  <Pressable
+                    onLongPress={canCopyCoords ? copyCoords : undefined}
+                    delayLongPress={500}
+                    hitSlop={8}
+                  >
+                    <Text style={styles.subLabel}>{subtitle}</Text>
+                    {coordsCopied && Platform.OS !== 'android' && (
+                      <Text style={styles.copiedHint}>{tr('coordsCopied')}</Text>
+                    )}
+                  </Pressable>
+                );
+              })()}
               {showSourceBadge && weather?.data?.source && weather.data.source !== 'open-meteo' ? (
                 <Text style={[styles.cityTime, { opacity: 0.75 }]}>
                   {tr('reserveSource', { source: SOURCE_NAMES[weather.data.source] || weather.data.source })}

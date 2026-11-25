@@ -1013,6 +1013,7 @@ export default function CityListScreen() {
       setCurrentLocation({
         id: '__current_location__',
         name: resolved?.name ?? `${latitude.toFixed(2)}, ${longitude.toFixed(2)}`,
+        country: resolved?.country || '',
         latitude,
         longitude,
         isCoordinateFallback: !resolved,
@@ -1082,7 +1083,7 @@ export default function CityListScreen() {
         Alert.alert(t('cities.error'), t('enterCityNotCountry'));
         return;
       }
-      const { latitude, longitude, name } = hit;
+      const { latitude, longitude, name, country } = hit;
       const resolvedName = name || cityName;
       const isDuplicate = citiesRef.current.some(
         c => c.name?.trim().toLowerCase() === resolvedName.trim().toLowerCase()
@@ -1097,6 +1098,7 @@ export default function CityListScreen() {
       const newCity = {
         id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
         name: resolvedName,
+        country: country || '',
         latitude,
         longitude,
         ...(enrichment || { temp: '–', minMax: '', condition: getWeatherConditionText(0), weathercode: 0, isNight: false }),
@@ -1125,14 +1127,19 @@ export default function CityListScreen() {
     });
   }, []);
 
-  const handleSelectCity = useCallback(async (cityName, latitude, longitude) => {
+  const handleSelectCity = useCallback(async (cityName, latitude, longitude, country) => {
     try {
       await AsyncStorage.setItem(LAST_SELECTED_CITY_KEY, cityName);
       // Use unified `city` key (same as WeatherPhenomenonFinder) so an older
       // `city` param never shadows `selectedCity`, and pass `{ pop: true }`
       // so React Navigation v7 returns to the EXISTING Tabs screen instead of
       // pushing a duplicate Tabs instance onto the stack.
-      const params = { city: cityName, selectedCity: cityName, ts: Date.now() };
+      const params = {
+        city: cityName,
+        selectedCity: cityName,
+        country: country || undefined,
+        ts: Date.now(),
+      };
       if (typeof latitude === 'number' && typeof longitude === 'number' && Number.isFinite(latitude) && Number.isFinite(longitude)) {
         params.latitude = latitude;
         params.longitude = longitude;
@@ -1160,7 +1167,7 @@ export default function CityListScreen() {
       toggleSelectCity(id);
     } else {
       const found = citiesRef.current.find((c) => c.id === id);
-      handleSelectCity(name, found?.latitude, found?.longitude);
+      handleSelectCity(name, found?.latitude, found?.longitude, found?.country);
     }
   }, [isSelectionMode, toggleSelectCity, handleSelectCity]);
 
@@ -1249,7 +1256,12 @@ export default function CityListScreen() {
   const hasInitialLocationRef = useRef(cachedCurrentLocation !== null);
   const handleSelectCurrentLocation = useCallback(() => {
     if (!currentLocation || currentLocation.isCoordinateFallback) return;
-    handleSelectCity(currentLocation.name, currentLocation.latitude, currentLocation.longitude);
+    handleSelectCity(
+      currentLocation.name,
+      currentLocation.latitude,
+      currentLocation.longitude,
+      currentLocation.country,
+    );
   }, [currentLocation, handleSelectCity]);
 
   const listHeaderElement = useMemo(() => (

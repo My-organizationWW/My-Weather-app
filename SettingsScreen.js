@@ -59,6 +59,182 @@ const MENU_STYLE_OPTIONS = [
   { value: 'inline', labelKey: 'menuStyle.inline' },
 ];
 
+const LOCATION_SUBTITLE_OPTIONS = [
+  { value: 'both', labelKey: 'locationSubtitle.both' },
+  { value: 'country', labelKey: 'locationSubtitle.country' },
+  { value: 'coords', labelKey: 'locationSubtitle.coords' },
+];
+
+function LocationSubtitleSegment({ visible, value, onSelect, tr, theme, styles, fs }) {
+  const expand = useRef(new Animated.Value(visible ? 1 : 0)).current;
+  const initialIdx = Math.max(0, LOCATION_SUBTITLE_OPTIONS.findIndex((o) => o.value === value));
+  const pillAnim = useRef(new Animated.Value(initialIdx)).current;
+  const stretchAnim = useRef(new Animated.Value(0)).current;
+  const [contentHeight, setContentHeight] = useState(0);
+  const [rowWidth, setRowWidth] = useState(0);
+  const didMountExpandRef = useRef(false);
+  const didMountPillRef = useRef(false);
+
+  const selectedIndex = Math.max(0, LOCATION_SUBTITLE_OPTIONS.findIndex((o) => o.value === value));
+
+  useEffect(() => {
+    if (!didMountExpandRef.current) {
+      didMountExpandRef.current = true;
+      expand.setValue(visible ? 1 : 0);
+      return;
+    }
+    Animated.timing(expand, {
+      toValue: visible ? 1 : 0,
+      duration: visible ? 300 : 220,
+      easing: visible ? Easing.bezier(0.22, 1, 0.36, 1) : Easing.inOut(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+  }, [visible, expand]);
+
+  useEffect(() => {
+    if (!didMountPillRef.current) {
+      didMountPillRef.current = true;
+      pillAnim.setValue(selectedIndex);
+      return;
+    }
+    stretchAnim.stopAnimation();
+    stretchAnim.setValue(0);
+    Animated.parallel([
+      Animated.spring(pillAnim, {
+        toValue: selectedIndex,
+        stiffness: 320,
+        damping: 26,
+        mass: 0.85,
+        useNativeDriver: true,
+      }),
+      Animated.sequence([
+        Animated.timing(stretchAnim, {
+          toValue: 1,
+          duration: 90,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.spring(stretchAnim, {
+          toValue: 0,
+          stiffness: 280,
+          damping: 20,
+          useNativeDriver: true,
+        }),
+      ]),
+    ]).start();
+  }, [selectedIndex, pillAnim, stretchAnim]);
+
+  const count = LOCATION_SUBTITLE_OPTIONS.length;
+  const pad = 4;
+  const gap = 4;
+  const pillWidth = rowWidth > pad * 2 ? (rowWidth - pad * 2 - gap * (count - 1)) / count : 0;
+
+  const containerHeight = contentHeight > 0
+    ? expand.interpolate({ inputRange: [0, 1], outputRange: [0, contentHeight] })
+    : (visible ? undefined : 0);
+  const innerOpacity = expand.interpolate({ inputRange: [0, 0.35, 1], outputRange: [0, 0.55, 1] });
+  const innerTranslateY = expand.interpolate({ inputRange: [0, 1], outputRange: [-8, 0] });
+  const innerScale = expand.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] });
+  const pillTranslateX = pillAnim.interpolate({
+    inputRange: [0, 1, 2],
+    outputRange: [0, pillWidth + gap, (pillWidth + gap) * 2],
+  });
+  const pillScaleX = stretchAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.07] });
+  const pillScaleY = stretchAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 0.95] });
+
+  return (
+    <Animated.View
+      style={{ height: containerHeight, overflow: 'hidden', position: 'relative' }}
+      pointerEvents={visible ? 'auto' : 'none'}
+      accessibilityElementsHidden={!visible}
+      importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}
+    >
+      <Animated.View
+        onLayout={(e) => {
+          const h = Math.ceil(e.nativeEvent.layout.height);
+          if (h > 0 && h !== contentHeight) setContentHeight(h);
+        }}
+        style={[
+          contentHeight > 0 || !visible ? { position: 'absolute', top: 0, left: 0, right: 0 } : null,
+          {
+            paddingTop: fs.spacing * 0.75,
+            opacity: innerOpacity,
+            transform: [{ translateY: innerTranslateY }, { scale: innerScale }],
+          },
+        ]}
+      >
+        <View
+          style={styles.segmentRow}
+          onLayout={(e) => {
+            const w = e.nativeEvent.layout.width;
+            if (w > 0 && Math.abs(w - rowWidth) > 0.5) setRowWidth(w);
+          }}
+        >
+          {pillWidth > 0 && (
+            <Animated.View
+              pointerEvents="none"
+              style={[
+                styles.segmentPill,
+                {
+                  width: pillWidth,
+                  backgroundColor: theme.accent,
+                  transform: [
+                    { translateX: pillTranslateX },
+                    { scaleX: pillScaleX },
+                    { scaleY: pillScaleY },
+                  ],
+                },
+              ]}
+            />
+          )}
+          {LOCATION_SUBTITLE_OPTIONS.map((opt, idx) => {
+            // Sync label brightness smoothly with the sliding pill position so
+            // text never snaps gray while the accent pill is still underneath it.
+            const activeOpacity = pillAnim.interpolate({
+              inputRange: [idx - 1, idx, idx + 1],
+              outputRange: [0, 1, 0],
+              extrapolate: 'clamp',
+            });
+            const inactiveOpacity = pillAnim.interpolate({
+              inputRange: [idx - 1, idx, idx + 1],
+              outputRange: [1, 0, 1],
+              extrapolate: 'clamp',
+            });
+            return (
+              <PressableScale
+                key={opt.value}
+                style={styles.segmentBtn}
+                scaleTo={0.96}
+                haptic
+                onPress={() => onSelect(opt.value)}
+              >
+                <View style={styles.segmentLabelWrap}>
+                  <Animated.Text
+                    style={[styles.segmentText, { opacity: inactiveOpacity }]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.82}
+                  >
+                    {tr(opt.labelKey)}
+                  </Animated.Text>
+                  <Animated.Text
+                    style={[styles.segmentText, styles.segmentTextActive, styles.segmentTextOverlay, { opacity: activeOpacity }]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.82}
+                  >
+                    {tr(opt.labelKey)}
+                  </Animated.Text>
+                </View>
+              </PressableScale>
+            );
+          })}
+        </View>
+      </Animated.View>
+    </Animated.View>
+  );
+}
+
 const APP_VERSION = require('./package.json').version;
 const APP_ICON_SOURCE = require('./assets/icon.png');
 const GITHUB_URL = 'https://github.com/werxuiiika/My-Weather-app';
@@ -120,6 +296,63 @@ function buildStyles(theme, fs) {
       paddingVertical: fs.spacing * 0.875,
       minHeight: 70 * fs.fontScale,
       marginTop: fs.spacing * 0.5,
+    },
+    cardColumn: {
+      backgroundColor: theme.surface,
+      borderRadius: 16,
+      paddingHorizontal: fs.spacing,
+      paddingVertical: fs.spacing * 0.875,
+      marginTop: fs.spacing * 0.5,
+    },
+    cardTopRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+    },
+    segmentRow: {
+      flexDirection: 'row',
+      backgroundColor: theme.background,
+      borderRadius: 12,
+      padding: 4,
+      gap: 4,
+      position: 'relative',
+    },
+    segmentPill: {
+      position: 'absolute',
+      top: 4,
+      bottom: 4,
+      left: 4,
+      borderRadius: 9,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.2,
+      shadowRadius: 4,
+      elevation: 2,
+    },
+    segmentBtn: {
+      flex: 1,
+      paddingVertical: fs.spacing * 0.5,
+      paddingHorizontal: 6,
+      borderRadius: 9,
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: 1,
+    },
+    segmentLabelWrap: {
+      position: 'relative',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    segmentText: {
+      fontSize: fs.small * 0.95,
+      fontWeight: '600',
+      color: theme.textSecondary,
+    },
+    segmentTextActive: {
+      color: theme.onAccent || '#ffffff',
+      fontWeight: '700',
+    },
+    segmentTextOverlay: {
+      position: 'absolute',
     },
     cardTextWrap: { flex: 1, marginRight: fs.spacing * 0.5, minWidth: 0 },
     cardTitle: { fontSize: fs.base, fontWeight: '600', color: theme.text },
@@ -911,7 +1144,26 @@ export default function SettingsScreen() {
   const navigation = useNavigation();
   const { t: tr, i18n: i18nInstance } = useTranslation();
   const { theme, setThemeMode, themeMode } = useTheme();
-  const { tempUnit, windUnit, setTempUnit, setWindUnit, showSourceBadge, setShowSourceBadge } = useSettings();
+  const {
+    tempUnit,
+    windUnit,
+    setTempUnit,
+    setWindUnit,
+    showSourceBadge,
+    setShowSourceBadge,
+    locationSubtitleMode,
+    setLocationSubtitleMode,
+  } = useSettings();
+  const lastVisibleSubtitleModeRef = useRef(
+    locationSubtitleMode && locationSubtitleMode !== 'hidden' ? locationSubtitleMode : 'both',
+  );
+  if (locationSubtitleMode && locationSubtitleMode !== 'hidden') {
+    lastVisibleSubtitleModeRef.current = locationSubtitleMode;
+  }
+  const locationSubtitleVisible = locationSubtitleMode !== 'hidden';
+  const toggleLocationSubtitle = (enabled) => {
+    setLocationSubtitleMode(enabled ? lastVisibleSubtitleModeRef.current : 'hidden');
+  };
   const fs = useFontSize();
   const { fontScale, setFontScale } = fs;
   const styles = useMemo(() => buildStyles(theme, fs), [theme, fs]);
@@ -1190,6 +1442,31 @@ export default function SettingsScreen() {
               trackColor={{ false: theme.textMuted, true: theme.accent2 }}
               thumbColor="#ffffff"
               accessibilityLabel={tr('showSource')}
+            />
+          </View>
+          <View style={styles.cardColumn}>
+            <View style={styles.cardTopRow}>
+              <View style={[styles.cardTextWrap, { flex: 1 }]}>
+                <Text style={styles.cardTitle}>{tr('locationSubtitle')}</Text>
+                <Text style={styles.cardDesc}>{tr('locationSubtitleDesc')}</Text>
+              </View>
+              <AnimatedSwitch
+                style={{ flexShrink: 0, alignSelf: 'center', marginLeft: 10 }}
+                value={locationSubtitleVisible}
+                onValueChange={toggleLocationSubtitle}
+                trackColor={{ false: theme.textMuted, true: theme.accent2 }}
+                thumbColor="#ffffff"
+                accessibilityLabel={tr('locationSubtitle')}
+              />
+            </View>
+            <LocationSubtitleSegment
+              visible={locationSubtitleVisible}
+              value={locationSubtitleVisible ? locationSubtitleMode : lastVisibleSubtitleModeRef.current}
+              onSelect={setLocationSubtitleMode}
+              tr={tr}
+              theme={theme}
+              styles={styles}
+              fs={fs}
             />
           </View>
         </View>

@@ -280,10 +280,59 @@ function computeCurrentTempPct(currentTemp, weekMin, weekMax, range) {
   return Math.max(lo, Math.min(hi, raw));
 }
 
+const COUNTRY_SHORT_MAP = {
+  'соединенные штаты америки': 'США',
+  'соединённые штаты америки': 'США',
+  'соединенные штаты': 'США',
+  'соединённые штаты': 'США',
+  'united states of america': 'USA',
+  'united states': 'USA',
+  'российская федерация': 'Россия',
+  'russian federation': 'Russia',
+  'объединенные арабские эмираты': 'ОАЭ',
+  'объединённые арабские эмираты': 'ОАЭ',
+  'united arab emirates': 'UAE',
+  'соединенное королевство': 'Великобритания',
+  'соединённое королевство': 'Великобритания',
+  'united kingdom': 'UK',
+  'республика корея': 'Южная Корея',
+  'republic of korea': 'South Korea',
+};
+
+function formatCountryName(country) {
+  if (!country || typeof country !== 'string') return '';
+  const trimmed = country.trim();
+  if (!trimmed || isCoordsLikeText(trimmed)) return '';
+  const mapped = COUNTRY_SHORT_MAP[trimmed.toLowerCase()];
+  return mapped || trimmed;
+}
+
+function formatLocationSubtitle(place, mode = 'both') {
+  if (!place || mode === 'hidden') return null;
+  const hasCoords =
+    typeof place.latitude === 'number' && Number.isFinite(place.latitude) &&
+    typeof place.longitude === 'number' && Number.isFinite(place.longitude);
+  const coordsLabel = hasCoords ? `${place.latitude.toFixed(2)}, ${place.longitude.toFixed(2)}` : '';
+  const rawCountry = formatCountryName(place.country);
+  const norm = (s) => String(s || '').replace(/\s+/g, '');
+  const countryLabel = rawCountry && norm(rawCountry) !== norm(coordsLabel) ? rawCountry : '';
+
+  if (mode === 'country') {
+    return countryLabel || null;
+  }
+  if (mode === 'coords') {
+    return coordsLabel || null;
+  }
+  if (countryLabel && coordsLabel) return `${countryLabel} · ${coordsLabel}`;
+  return countryLabel || coordsLabel || null;
+}
+
 export {
   weathercodeToType,
   isNightHour,
   isCoordsLikeText,
+  formatCountryName,
+  formatLocationSubtitle,
   getHourlyTimeline,
   beaufortFromMs,
   convertWind,
