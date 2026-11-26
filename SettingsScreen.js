@@ -1676,6 +1676,7 @@ export default function SettingsScreen() {
           onClose={() => setShowLogViewer(false)}
           theme={theme}
           fs={fs}
+          showAlert={showAlert}
         />
       )}
       {hasMountedImportModal && menuStyle !== 'inline' && (

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
-import { View, Text, TextInput, FlatList, Alert, StatusBar, RefreshControl, StyleSheet, Animated as RNAnimated } from 'react-native';
+import { View, Text, TextInput, FlatList, StatusBar, RefreshControl, StyleSheet, Animated as RNAnimated } from 'react-native';
 import Animated, { useSharedValue, useAnimatedStyle, useAnimatedReaction, withTiming, withSpring, Easing } from 'react-native-reanimated';
 import ScreenWrapper from './ScreenWrapper';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -21,6 +21,7 @@ import DraggableCityCard, { StaticCityCardPreview } from './DraggableCityCard';
 import CurrentLocationCard from './CurrentLocationCard';
 import PressableScale from './components/PressableScale';
 import FadeSlideIn from './components/FadeSlideIn';
+import CustomAlert, { useCustomAlert } from './components/CustomAlert';
 import { getPluralSelectedText } from './utils/plural';
 
 const SAVED_CITIES_KEY = 'saved_cities_list';
@@ -334,6 +335,7 @@ export default function CityListScreen() {
   const { tempUnit } = useSettings();
   const { t, i18n } = useTranslation();
   const insets = useSafeAreaInsets();
+  const { alert, showAlert, hideAlert } = useCustomAlert();
   const mountedRef = useRef(true);
   const refreshSeqRef = useRef(0);
   const refreshAbortRef = useRef(null);
@@ -1076,11 +1078,21 @@ export default function CityListScreen() {
       const hit = await searchCity(cityName, currentLang, addFetch);
 
       if (!hit) {
-        Alert.alert(t('cities.error'), t('cities.city_not_found'));
+        showAlert({
+          title: t('cities.error'),
+          message: t('cities.city_not_found'),
+          dismissable: true,
+          buttons: [{ text: t('ok') }],
+        });
         return;
       }
       if (isRegionLike(hit)) {
-        Alert.alert(t('cities.error'), t('enterCityNotCountry'));
+        showAlert({
+          title: t('cities.error'),
+          message: t('enterCityNotCountry'),
+          dismissable: true,
+          buttons: [{ text: t('ok') }],
+        });
         return;
       }
       const { latitude, longitude, name, country } = hit;
@@ -1089,7 +1101,12 @@ export default function CityListScreen() {
         c => c.name?.trim().toLowerCase() === resolvedName.trim().toLowerCase()
       );
       if (isDuplicate) {
-        Alert.alert(t('cities.notice'), t('cities.already_added'));
+        showAlert({
+          title: t('cities.notice'),
+          message: t('cities.already_added'),
+          dismissable: true,
+          buttons: [{ text: t('ok') }],
+        });
         setSearchQuery('');
         return;
       }
@@ -1109,7 +1126,12 @@ export default function CityListScreen() {
       await AsyncStorage.setItem(SAVED_CITIES_KEY, JSON.stringify(updated));
       setSearchQuery('');
     } catch (e) {
-      Alert.alert(t('cities.error'), t('cities.add_failed'));
+      showAlert({
+        title: t('cities.error'),
+        message: t('cities.add_failed'),
+        dismissable: true,
+        buttons: [{ text: t('ok') }],
+      });
     } finally {
       if (mountedRef.current) setIsLoading(false);
     }
@@ -1474,6 +1496,7 @@ export default function CityListScreen() {
           onConfirm={handleConfirmDelete}
         />
       )}
+      <CustomAlert state={alert} onDismiss={hideAlert} theme={theme} fs={fs} />
     </ScreenWrapper>
   );
 }

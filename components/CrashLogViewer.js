@@ -7,7 +7,6 @@ import {
   ScrollView,
   ActivityIndicator,
   Share,
-  Alert,
   StyleSheet,
 } from 'react-native';
 import { useTranslation } from 'react-i18next';
@@ -23,7 +22,7 @@ import {
   testLogWrite,
 } from '../utils/crashLogger';
 
-export default function CrashLogViewer({ visible, onClose, theme, fs }) {
+export default function CrashLogViewer({ visible, onClose, theme, fs, showAlert }) {
   const { t } = useTranslation();
   const [internalFiles, setInternalFiles] = useState([]);
   const [downloadFiles, setDownloadFiles] = useState([]);
@@ -97,21 +96,26 @@ export default function CrashLogViewer({ visible, onClose, theme, fs }) {
   };
 
   const clearInternal = () => {
-    Alert.alert(t('crashLogsClearTitle'), t('crashLogsClearMsg', { count: internalFiles.length }), [
-      { text: t('cancel'), style: 'cancel' },
-      {
-        text: t('crashLogsDelete'),
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            for (const f of internalFiles) {
-              await FileSystem.deleteAsync(f.path, { idempotent: true });
-            }
-          } catch (e) {}
-          refresh();
-        },
-      },
-    ]);
+    const doClear = async () => {
+      try {
+        for (const f of internalFiles) {
+          await FileSystem.deleteAsync(f.path, { idempotent: true });
+        }
+      } catch (e) {}
+      refresh();
+    };
+    if (showAlert) {
+      showAlert({
+        title: t('crashLogsClearTitle'),
+        message: t('crashLogsClearMsg', { count: internalFiles.length }),
+        buttons: [
+          { text: t('cancel'), style: 'cancel' },
+          { text: t('crashLogsDelete'), style: 'destructive', onPress: doClear },
+        ],
+      });
+    } else {
+      doClear();
+    }
   };
 
   const deleteOneDownload = async (file) => {

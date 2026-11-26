@@ -21,6 +21,7 @@ import {
   View,
   Text,
   Modal,
+  TouchableWithoutFeedback,
   Animated,
   Dimensions,
   Easing,
@@ -104,11 +105,11 @@ function ToastContent({ title, message, onDone, fs }) {
 }
 
 function AlertDialog({ state, onDismiss, styles }) {
-  const { title, message, icon, buttons = [] } = state;
-  const row = buttons.length === 2;
+  const { title, message, icon, buttons = [], dismissable = false } = state;
+  const stacked = buttons.length > 2;
   const opacity = useRef(new Animated.Value(0)).current;
-  const scale = useRef(new Animated.Value(0.92)).current;
-  const translateY = useRef(new Animated.Value(10)).current;
+  const scale = useRef(new Animated.Value(0.94)).current;
+  const translateY = useRef(new Animated.Value(6)).current;
   const dim = useRef(new Animated.Value(0)).current;
   const closing = useRef(false);
 
@@ -116,25 +117,25 @@ function AlertDialog({ state, onDismiss, styles }) {
     Animated.parallel([
       Animated.timing(dim, {
         toValue: 1,
-        duration: 180,
+        duration: 160,
         easing: Easing.out(Easing.quad),
         useNativeDriver: true,
       }),
       Animated.timing(opacity, {
         toValue: 1,
-        duration: 180,
+        duration: 160,
         easing: Easing.out(Easing.quad),
         useNativeDriver: true,
       }),
       Animated.spring(scale, {
         toValue: 1,
-        friction: 9,
-        tension: 140,
+        friction: 10,
+        tension: 160,
         useNativeDriver: true,
       }),
       Animated.timing(translateY, {
         toValue: 0,
-        duration: 220,
+        duration: 190,
         easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
       }),
@@ -149,19 +150,19 @@ function AlertDialog({ state, onDismiss, styles }) {
     Animated.parallel([
       Animated.timing(dim, {
         toValue: 0,
-        duration: 140,
+        duration: 130,
         easing: Easing.in(Easing.quad),
         useNativeDriver: true,
       }),
       Animated.timing(opacity, {
         toValue: 0,
-        duration: 130,
+        duration: 120,
         easing: Easing.in(Easing.quad),
         useNativeDriver: true,
       }),
       Animated.timing(scale, {
         toValue: 0.96,
-        duration: 140,
+        duration: 130,
         easing: Easing.in(Easing.quad),
         useNativeDriver: true,
       }),
@@ -195,37 +196,44 @@ function AlertDialog({ state, onDismiss, styles }) {
       onRequestClose={cancelFallback}
     >
       <View style={styles.overlay}>
-        <Animated.View
-          pointerEvents="none"
-          style={[StyleSheet.absoluteFillObject, styles.dim, { opacity: dim }]}
-        />
+        <TouchableWithoutFeedback onPress={dismissable ? cancelFallback : undefined}>
+          <Animated.View
+            style={[StyleSheet.absoluteFillObject, styles.dim, { opacity: dim }]}
+          />
+        </TouchableWithoutFeedback>
         <Animated.View
           style={[styles.card, { opacity, transform: [{ scale }, { translateY }] }]}
         >
           {icon ? (
             <View style={styles.iconWrap}>
-              <Ionicons name={icon.name} size={44} color={icon.color} />
+              <Ionicons name={icon.name} size={28} color={icon.color} />
             </View>
           ) : null}
           <Text style={styles.title}>{title}</Text>
           {message ? <Text style={styles.message}>{message}</Text> : null}
-          <View style={row ? styles.btnRow : styles.btnColumn}>
+          <View style={stacked ? styles.btnColumn : styles.btnRow}>
             {buttons.map((b, i) => {
               const isDestructive = b.style === 'destructive';
-              const isGhost = b.style === 'cancel';
+              const isCancel = b.style === 'cancel';
               return (
                 <PressableScale
                   key={`${b.text}-${i}`}
-                  style={[
-                    styles.btn,
-                    row && styles.btnFlex,
-                    isGhost ? styles.btnGhost : isDestructive ? styles.btnDestructive : styles.btnDefault,
-                  ]}
+                  style={styles.btn}
                   onPress={() => press(b)}
-                  scaleTo={0.97}
-                  activeOpacity={0.8}
+                  scaleTo={0.94}
+                  activeOpacity={0.65}
                 >
-                  <Text style={isGhost ? styles.btnGhostText : styles.btnFillText}>{b.text}</Text>
+                  <Text
+                    style={
+                      isCancel
+                        ? styles.btnCancelText
+                        : isDestructive
+                          ? styles.btnDestructiveText
+                          : styles.btnDefaultText
+                    }
+                  >
+                    {b.text}
+                  </Text>
                 </PressableScale>
               );
             })}
@@ -267,67 +275,69 @@ export default function CustomAlert({ state, onDismiss, theme, fs }) {
     },
     card: {
       width: '100%',
-      maxWidth: 340,
+      maxWidth: 332,
       backgroundColor: theme.surface,
-      borderRadius: 14,
-      paddingHorizontal: 18,
-      paddingTop: 18,
-      paddingBottom: 10,
+      borderRadius: 16,
+      paddingHorizontal: 24,
+      paddingTop: 22,
+      paddingBottom: 12,
       borderWidth: 1,
       borderColor: theme.border,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 8 },
+      shadowOpacity: 0.28,
+      shadowRadius: 18,
+      elevation: 20,
     },
     iconWrap: {
-      alignSelf: 'center',
+      alignSelf: 'flex-start',
       marginBottom: 10,
     },
     title: {
       color: theme.text,
-      fontSize: fs.base,
+      fontSize: fs.base * 1.15,
       fontWeight: '700',
-      textAlign: 'center',
-      marginBottom: 6,
+      textAlign: 'left',
+      marginBottom: 10,
     },
     message: {
       color: theme.textSecondary,
-      fontSize: fs.base * 0.9,
-      textAlign: 'center',
-      marginBottom: 16,
+      fontSize: fs.base * 0.94,
+      lineHeight: fs.base * 1.35,
+      textAlign: 'left',
+      marginBottom: 18,
     },
     btnColumn: {
-      marginBottom: 0,
+      alignItems: 'flex-end',
+      gap: 4,
     },
     btnRow: {
       flexDirection: 'row',
+      justifyContent: 'flex-end',
+      alignItems: 'center',
       gap: 8,
     },
     btn: {
       borderRadius: 10,
-      paddingVertical: 11,
+      paddingVertical: 10,
+      paddingHorizontal: 14,
       alignItems: 'center',
-      marginBottom: 8,
+      justifyContent: 'center',
     },
-    btnFlex: {
-      flex: 1,
-    },
-    btnGhost: {
-      borderWidth: 1,
-      borderColor: theme.border,
-    },
-    btnDestructive: {
-      backgroundColor: theme.danger,
-    },
-    btnDefault: {
-      backgroundColor: theme.accent,
-    },
-    btnGhostText: {
-      color: theme.text,
+    btnCancelText: {
+      color: theme.textSecondary,
       fontWeight: '600',
-      fontSize: fs.base * 0.9,
+      fontSize: fs.base * 0.92,
     },
-    btnFillText: {
-      color: theme.onAccent,
+    btnDestructiveText: {
+      color: theme.danger || '#FF453A',
       fontWeight: '700',
-      fontSize: fs.base * 0.9,
+      fontSize: fs.base * 0.92,
+    },
+    btnDefaultText: {
+      color: theme.accent,
+      fontWeight: '700',
+      fontSize: fs.base * 0.92,
     },
   });
 

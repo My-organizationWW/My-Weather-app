@@ -12,7 +12,6 @@ import {
   ActivityIndicator,
   ScrollView,
   RefreshControl,
-  Alert,
   Animated,
   Easing,
   Linking,
@@ -26,6 +25,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import ScreenWrapper from './ScreenWrapper';
 import PressableScale from './components/PressableScale';
 import FadeSlideIn from './components/FadeSlideIn';
+import CustomAlert, { useCustomAlert } from './components/CustomAlert';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRoute, useNavigation, useFocusEffect } from '@react-navigation/native';
@@ -245,6 +245,7 @@ export default function App() {
   const [splashRendered, setSplashRendered] = useState(true);
   const [menuVisible, setMenuVisible] = useState(false);
   const [permissionModalVisible, setPermissionModalVisible] = useState(false);
+  const { alert, showAlert, hideAlert } = useCustomAlert();
   const menuAnim = useRef(new Animated.Value(0)).current;
 
   // Monotonic request guard + active AbortController so rapid city switches
@@ -746,7 +747,13 @@ export default function App() {
   const search = () => {
     const query = city.trim();
     if (!query) {
-      Alert.alert(tr('enterCity'), tr('enterCityMessage'));
+      Keyboard.dismiss();
+      showAlert({
+        title: tr('enterCity'),
+        message: tr('enterCityMessage'),
+        dismissable: true,
+        buttons: [{ text: tr('ok') }],
+      });
       return;
     }
     Keyboard.dismiss();
@@ -1446,6 +1453,7 @@ export default function App() {
           theme={theme}
           fs={fs}
         />
+        <CustomAlert state={alert} onDismiss={hideAlert} theme={theme} fs={fs} />
     </ScreenWrapper>
   );
 }
